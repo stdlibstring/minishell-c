@@ -171,23 +171,44 @@ static int parse_arguments(char *line, char **args, int max_args) {
   return arg_count;
 }
 
-static int split_command_and_stdout_redirection(char **args, int arg_count,
-                                                char **command_args,
-                                                int max_args,
-                                                char **stdout_file,
-                                                char **stderr_file) {
+static int split_command_and_stdout_redirection(
+    char **args, int arg_count, char **command_args, int max_args,
+    char **stdout_file, int *stdout_append, char **stderr_file) {
   int command_arg_count = 0;
   *stdout_file = NULL;
+  *stdout_append = 0;
   *stderr_file = NULL;
 
   for (int i = 0; i < arg_count; i++) {
     char *token = args[i];
+
+    if (strcmp(token, ">>") == 0 || strcmp(token, "1>>") == 0) {
+      if (i + 1 >= arg_count) {
+        return -1;
+      }
+      *stdout_file = args[++i];
+      *stdout_append = 1;
+      continue;
+    }
+
+    if (strncmp(token, "1>>", 3) == 0 && token[3] != '\0') {
+      *stdout_file = token + 3;
+      *stdout_append = 1;
+      continue;
+    }
+
+    if (strncmp(token, ">>", 2) == 0 && token[2] != '\0') {
+      *stdout_file = token + 2;
+      *stdout_append = 1;
+      continue;
+    }
 
     if (strcmp(token, ">") == 0 || strcmp(token, "1>") == 0) {
       if (i + 1 >= arg_count) {
         return -1;
       }
       *stdout_file = args[++i];
+      *stdout_append = 0;
       continue;
     }
 
@@ -201,11 +222,13 @@ static int split_command_and_stdout_redirection(char **args, int arg_count,
 
     if (strncmp(token, "1>", 2) == 0 && token[2] != '\0') {
       *stdout_file = token + 2;
+      *stdout_append = 0;
       continue;
     }
 
     if (token[0] == '>' && token[1] != '\0') {
       *stdout_file = token + 1;
+      *stdout_append = 0;
       continue;
     }
 
@@ -224,8 +247,10 @@ static int split_command_and_stdout_redirection(char **args, int arg_count,
   return command_arg_count;
 }
 
-static int redirect_fd_to_file(int fd_to_redirect, const char *path) {
-  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+static int redirect_fd_to_file(int fd_to_redirect, const char *path,
+                               int append) {
+  int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
+  int fd = open(path, flags, 0644);
   if (fd < 0) {
     return -1;
   }
@@ -345,6 +370,7 @@ int main(int argc, char *argv[]) {
     int arg_count = parse_arguments(command, args, MAX_ARGS);
     char *command_args[MAX_ARGS];
     char *stdout_file = NULL;
+    int stdout_append = 0;
     char *stderr_file = NULL;
 
     if (arg_count == 0) {
@@ -352,7 +378,8 @@ int main(int argc, char *argv[]) {
     }
 
     int command_arg_count = split_command_and_stdout_redirection(
-        args, arg_count, command_args, MAX_ARGS, &stdout_file, &stderr_file);
+        args, arg_count, command_args, MAX_ARGS, &stdout_file, &stdout_append,
+        &stderr_file);
     if (command_arg_count <= 0) {
       continue;
     }
@@ -360,14 +387,15 @@ int main(int argc, char *argv[]) {
     int saved_stdout = -1;
     int saved_stderr = -1;
     if (stdout_file != NULL) {
-      saved_stdout = redirect_fd_to_file(STDOUT_FILENO, stdout_file);
+      saved_stdout =
+          redirect_fd_to_file(STDOUT_FILENO, stdout_file, stdout_append);
       if (saved_stdout < 0) {
         continue;
       }
     }
 
     if (stderr_file != NULL) {
-      saved_stderr = redirect_fd_to_file(STDERR_FILENO, stderr_file);
+      saved_stderr = redirect_fd_to_file(STDERR_FILENO, stderr_file, 0);
       if (saved_stderr < 0) {
         if (saved_stdout >= 0) {
           restore_fd(saved_stdout, STDOUT_FILENO);
