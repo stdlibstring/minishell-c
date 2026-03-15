@@ -995,6 +995,25 @@ static void load_history_from_histfile_env(void) {
   g_history_unsaved_count = 0;
 }
 
+static void write_history_to_histfile_env(void) {
+  const char *history_path = getenv("HISTFILE");
+  if (history_path == NULL || *history_path == '\0') {
+    return;
+  }
+
+  FILE *fp = fopen(history_path, "w");
+  if (fp == NULL) {
+    return;
+  }
+
+  for (int i = 0; i < g_history_count; i++) {
+    fprintf(fp, "%s\n", g_history[i]);
+  }
+
+  fclose(fp);
+  g_history_unsaved_count = 0;
+}
+
 // Parse command line into argv-like tokens.
 // Rules implemented here:
 // - Whitespace separates arguments when outside quotes.
@@ -1599,6 +1618,7 @@ int main(int argc, char *argv[]) {
     restore_redirections(&saved);
 
     if (should_exit) {
+      write_history_to_histfile_env();
       break;
     }
   }
