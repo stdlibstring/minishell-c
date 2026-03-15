@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 
 #define MAX_COMMAND_LENGTH 256
@@ -37,7 +38,44 @@ typedef struct {
   int saved_stderr;
 } SavedDescriptors;
 
+typedef struct {
+  int enabled;
+  struct termios original;
+} TerminalMode;
+
 static void restore_fd(int saved_fd, int target_fd);
+
+static int enable_interactive_input_mode(TerminalMode *mode) {
+  mode->enabled = 0;
+
+  if (!isatty(STDIN_FILENO)) {
+    return 0;
+  }
+
+  if (tcgetattr(STDIN_FILENO, &mode->original) != 0) {
+    return -1;
+  }
+
+  struct termios raw = mode->original;
+  raw.c_lflag &= (tcflag_t) ~(ICANON | ECHO);
+  raw.c_cc[VMIN] = 1;
+  raw.c_cc[VTIME] = 0;
+
+  if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) {
+    return -1;
+  }
+
+  mode->enabled = 1;
+  return 0;
+}
+
+static void restore_interactive_input_mode(TerminalMode *mode) {
+  if (!mode->enabled) {
+    return;
+  }
+  tcsetattr(STDIN_FILENO, TCSANOW, &mode->original);
+  mode->enabled = 0;
+}
 
 // Try to autocomplete the first command word when TAB is pressed.
 // Only "echo" and "exit" are considered in this stage.
@@ -559,6 +597,11 @@ int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
 
+  TerminalMode terminal_mode;
+  if (enable_interactive_input_mode(&terminal_mode) != 0) {
+    terminal_mode.enabled = 0;
+  }
+
   // Flush after every printf
   setbuf(stdout, NULL);
 
@@ -603,6 +646,8 @@ int main(int argc, char *argv[]) {
       break;
     }
   }
+
+  restore_interactive_input_mode(&terminal_mode);
 
   return 0;
 }
