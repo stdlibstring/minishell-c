@@ -109,12 +109,18 @@ static int parse_arguments(char *line, char **args, int max_args) {
     args[arg_count++] = write;
     int in_single_quote = 0;
 
-    while (*read != '\0' &&
-           (in_single_quote || (*read != ' ' && *read != '\t'))) {
+    while (*read != '\0') {
       if (*read == '\'') {
         in_single_quote = !in_single_quote;
         read++;
         continue;
+      }
+
+      if (!in_single_quote && (*read == ' ' || *read == '\t')) {
+        while (*read == ' ' || *read == '\t') {
+          read++;
+        }
+        break;
       }
 
       *write++ = *read++;
