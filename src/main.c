@@ -587,7 +587,7 @@ static int parse_inline_redirection_token(char *token, int *fd, int *append,
     return 1;
   }
 
-  if (token[0] == '>' && token[1] != '\0') {
+  if (token[0] == '>' && token[1] != '\0' && token[1] != '>') {
     *fd = STDOUT_FILENO;
     *append = 0;
     *target = token + 1;
