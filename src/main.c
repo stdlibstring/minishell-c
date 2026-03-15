@@ -171,13 +171,16 @@ static int parse_arguments(char *line, char **args, int max_args) {
   return arg_count;
 }
 
-static int split_command_and_stdout_redirection(
-    char **args, int arg_count, char **command_args, int max_args,
-    char **stdout_file, int *stdout_append, char **stderr_file) {
+static int
+split_command_and_stdout_redirection(char **args, int arg_count,
+                                     char **command_args, int max_args,
+                                     char **stdout_file, int *stdout_append,
+                                     char **stderr_file, int *stderr_append) {
   int command_arg_count = 0;
   *stdout_file = NULL;
   *stdout_append = 0;
   *stderr_file = NULL;
+  *stderr_append = 0;
 
   for (int i = 0; i < arg_count; i++) {
     char *token = args[i];
@@ -191,6 +194,15 @@ static int split_command_and_stdout_redirection(
       continue;
     }
 
+    if (strcmp(token, "2>>") == 0) {
+      if (i + 1 >= arg_count) {
+        return -1;
+      }
+      *stderr_file = args[++i];
+      *stderr_append = 1;
+      continue;
+    }
+
     if (strncmp(token, "1>>", 3) == 0 && token[3] != '\0') {
       *stdout_file = token + 3;
       *stdout_append = 1;
@@ -200,6 +212,12 @@ static int split_command_and_stdout_redirection(
     if (strncmp(token, ">>", 2) == 0 && token[2] != '\0') {
       *stdout_file = token + 2;
       *stdout_append = 1;
+      continue;
+    }
+
+    if (strncmp(token, "2>>", 3) == 0 && token[3] != '\0') {
+      *stderr_file = token + 3;
+      *stderr_append = 1;
       continue;
     }
 
@@ -217,6 +235,7 @@ static int split_command_and_stdout_redirection(
         return -1;
       }
       *stderr_file = args[++i];
+      *stderr_append = 0;
       continue;
     }
 
@@ -234,6 +253,7 @@ static int split_command_and_stdout_redirection(
 
     if (strncmp(token, "2>", 2) == 0 && token[2] != '\0') {
       *stderr_file = token + 2;
+      *stderr_append = 0;
       continue;
     }
 
@@ -372,6 +392,7 @@ int main(int argc, char *argv[]) {
     char *stdout_file = NULL;
     int stdout_append = 0;
     char *stderr_file = NULL;
+    int stderr_append = 0;
 
     if (arg_count == 0) {
       continue; // 如果没有输入命令，继续下一轮循环
@@ -379,7 +400,7 @@ int main(int argc, char *argv[]) {
 
     int command_arg_count = split_command_and_stdout_redirection(
         args, arg_count, command_args, MAX_ARGS, &stdout_file, &stdout_append,
-        &stderr_file);
+        &stderr_file, &stderr_append);
     if (command_arg_count <= 0) {
       continue;
     }
@@ -395,7 +416,8 @@ int main(int argc, char *argv[]) {
     }
 
     if (stderr_file != NULL) {
-      saved_stderr = redirect_fd_to_file(STDERR_FILENO, stderr_file, 0);
+      saved_stderr =
+          redirect_fd_to_file(STDERR_FILENO, stderr_file, stderr_append);
       if (saved_stderr < 0) {
         if (saved_stdout >= 0) {
           restore_fd(saved_stdout, STDOUT_FILENO);
