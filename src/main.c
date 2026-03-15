@@ -1,16 +1,18 @@
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
-#include <limits.h>
+#include <unistd.h>
 
 static int is_builtin(const char *cmd) {
-  return strcmp(cmd, "echo") == 0 || strcmp(cmd, "type") == 0 || strcmp(cmd, "exit") == 0;
+  return strcmp(cmd, "echo") == 0 || strcmp(cmd, "type") == 0 ||
+         strcmp(cmd, "exit") == 0 || strcmp(cmd, "pwd") == 0;
 }
 
-static int find_executable_in_path(const char *name, char *out_path, size_t out_path_size) {
+static int find_executable_in_path(const char *name, char *out_path,
+                                   size_t out_path_size) {
   if (name == NULL || *name == '\0') {
     return 0;
   }
@@ -25,12 +27,14 @@ static int find_executable_in_path(const char *name, char *out_path, size_t out_
     return 0;
   }
 
-  for (char *dir = strtok(path_copy, ":"); dir != NULL; dir = strtok(NULL, ":")) {
+  for (char *dir = strtok(path_copy, ":"); dir != NULL;
+       dir = strtok(NULL, ":")) {
     char full_path[PATH_MAX];
     snprintf(full_path, sizeof(full_path), "%s/%s", dir, name);
 
     struct stat st;
-    if (stat(full_path, &st) == 0 && S_ISREG(st.st_mode) && access(full_path, X_OK) == 0) {
+    if (stat(full_path, &st) == 0 && S_ISREG(st.st_mode) &&
+        access(full_path, X_OK) == 0) {
       snprintf(out_path, out_path_size, "%s", full_path);
       free(path_copy);
       return 1;
@@ -42,13 +46,13 @@ static int find_executable_in_path(const char *name, char *out_path, size_t out_
 }
 
 static void handle_type(const char *name) {
-  if(name == NULL || *name == '\0') {
+  if (name == NULL || *name == '\0') {
     printf("type: missing operand\r\n");
     return;
   }
 
   // 1) builtin
-  if(is_builtin(name)) {
+  if (is_builtin(name)) {
     printf("%s is a shell builtin\r\n", name);
     return;
   }
@@ -66,7 +70,7 @@ int main(int argc, char *argv[]) {
   setbuf(stdout, NULL);
 
   char command[256];
-  while(1){
+  while (1) {
     printf("$ ");
     if (fgets(command, sizeof(command), stdin) == NULL) {
       break;
@@ -83,16 +87,16 @@ int main(int argc, char *argv[]) {
       token = strtok(NULL, " \t");
     }
     args[arg_count] = NULL;
-    
-    if(arg_count == 0) {
+
+    if (arg_count == 0) {
       continue; // 如果没有输入命令，继续下一轮循环
     }
 
     char *cmd = args[0];
 
-    if(strcmp(cmd, "exit") == 0) {
+    if (strcmp(cmd, "exit") == 0) {
       break;
-    } else if(strcmp(cmd, "echo") == 0) {
+    } else if (strcmp(cmd, "echo") == 0) {
       for (int i = 1; i < arg_count; i++) {
         if (i > 1) {
           printf(" ");
@@ -100,7 +104,14 @@ int main(int argc, char *argv[]) {
         printf("%s", args[i]);
       }
       printf("\r\n");
-    } else if(strcmp(cmd, "type") == 0) {
+    } else if (strcmp(cmd, "pwd") == 0) {
+      char cwd[PATH_MAX];
+      if (getcwd(cwd, sizeof(cwd)) != NULL) {
+        printf("%s\r\n", cwd);
+      } else {
+        perror("pwd");
+      }
+    } else if (strcmp(cmd, "type") == 0) {
       handle_type(arg_count > 1 ? args[1] : NULL);
     } else {
       char full_path[PATH_MAX];
@@ -120,6 +131,6 @@ int main(int argc, char *argv[]) {
       }
     }
   }
-  
+
   return 0;
 }
