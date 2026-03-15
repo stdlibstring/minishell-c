@@ -16,6 +16,7 @@
 static const char *k_builtin_completion_candidates[] = {"echo", "exit"};
 static char g_history[MAX_HISTORY][MAX_COMMAND_LENGTH];
 static int g_history_count = 0;
+static int g_history_unsaved_count = 0;
 
 // Treat only space and tab as argument separators in this stage.
 static int is_inline_whitespace(char c) { return c == ' ' || c == '\t'; }
@@ -115,6 +116,9 @@ static void append_history_entry(const char *command) {
   if (g_history_count < MAX_HISTORY) {
     snprintf(g_history[g_history_count], MAX_COMMAND_LENGTH, "%s", command);
     g_history_count++;
+    if (g_history_unsaved_count < MAX_HISTORY) {
+      g_history_unsaved_count++;
+    }
     return;
   }
 
@@ -122,6 +126,9 @@ static void append_history_entry(const char *command) {
     snprintf(g_history[i - 1], MAX_COMMAND_LENGTH, "%s", g_history[i]);
   }
   snprintf(g_history[MAX_HISTORY - 1], MAX_COMMAND_LENGTH, "%s", command);
+  if (g_history_unsaved_count < MAX_HISTORY) {
+    g_history_unsaved_count++;
+  }
 }
 
 // Parsed redirection intent for one command line.
@@ -882,6 +889,26 @@ static void handle_cd(const char *path) {
 }
 
 static void handle_history(char **args, int arg_count) {
+  if (arg_count == 3 && strcmp(args[1], "-a") == 0) {
+    FILE *fp = fopen(args[2], "a");
+    if (fp == NULL) {
+      return;
+    }
+
+    int start = g_history_count - g_history_unsaved_count;
+    if (start < 0) {
+      start = 0;
+    }
+
+    for (int i = start; i < g_history_count; i++) {
+      fprintf(fp, "%s\n", g_history[i]);
+    }
+
+    fclose(fp);
+    g_history_unsaved_count = 0;
+    return;
+  }
+
   if (arg_count == 3 && strcmp(args[1], "-w") == 0) {
     FILE *fp = fopen(args[2], "w");
     if (fp == NULL) {
@@ -893,6 +920,7 @@ static void handle_history(char **args, int arg_count) {
     }
 
     fclose(fp);
+    g_history_unsaved_count = 0;
     return;
   }
 
