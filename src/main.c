@@ -131,6 +131,46 @@ static void append_history_entry(const char *command) {
   }
 }
 
+static void trim_line_endings(char *line) {
+  size_t len = strlen(line);
+  while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+    line[--len] = '\0';
+  }
+}
+
+static int write_history_range_to_file(const char *path, const char *mode,
+                                       int start, int end) {
+  FILE *fp = fopen(path, mode);
+  if (fp == NULL) {
+    return 0;
+  }
+
+  for (int i = start; i < end; i++) {
+    fprintf(fp, "%s\n", g_history[i]);
+  }
+
+  fclose(fp);
+  return 1;
+}
+
+static void load_history_from_file(const char *path) {
+  FILE *fp = fopen(path, "r");
+  if (fp == NULL) {
+    return;
+  }
+
+  char line[MAX_COMMAND_LENGTH];
+  while (fgets(line, sizeof(line), fp) != NULL) {
+    trim_line_endings(line);
+    if (line[0] == '\0') {
+      continue;
+    }
+    append_history_entry(line);
+  }
+
+  fclose(fp);
+}
+
 // Parsed redirection intent for one command line.
 typedef struct {
   char *stdout_file;
@@ -890,61 +930,26 @@ static void handle_cd(const char *path) {
 
 static void handle_history(char **args, int arg_count) {
   if (arg_count == 3 && strcmp(args[1], "-a") == 0) {
-    FILE *fp = fopen(args[2], "a");
-    if (fp == NULL) {
-      return;
-    }
-
     int start = g_history_count - g_history_unsaved_count;
     if (start < 0) {
       start = 0;
     }
 
-    for (int i = start; i < g_history_count; i++) {
-      fprintf(fp, "%s\n", g_history[i]);
+    if (write_history_range_to_file(args[2], "a", start, g_history_count)) {
+      g_history_unsaved_count = 0;
     }
-
-    fclose(fp);
-    g_history_unsaved_count = 0;
     return;
   }
 
   if (arg_count == 3 && strcmp(args[1], "-w") == 0) {
-    FILE *fp = fopen(args[2], "w");
-    if (fp == NULL) {
-      return;
+    if (write_history_range_to_file(args[2], "w", 0, g_history_count)) {
+      g_history_unsaved_count = 0;
     }
-
-    for (int i = 0; i < g_history_count; i++) {
-      fprintf(fp, "%s\n", g_history[i]);
-    }
-
-    fclose(fp);
-    g_history_unsaved_count = 0;
     return;
   }
 
   if (arg_count == 3 && strcmp(args[1], "-r") == 0) {
-    FILE *fp = fopen(args[2], "r");
-    if (fp == NULL) {
-      return;
-    }
-
-    char line[MAX_COMMAND_LENGTH];
-    while (fgets(line, sizeof(line), fp) != NULL) {
-      size_t len = strlen(line);
-      while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
-        line[--len] = '\0';
-      }
-
-      if (line[0] == '\0') {
-        continue;
-      }
-
-      append_history_entry(line);
-    }
-
-    fclose(fp);
+    load_history_from_file(args[2]);
     return;
   }
 
@@ -972,26 +977,7 @@ static void load_history_from_histfile_env(void) {
     return;
   }
 
-  FILE *fp = fopen(history_path, "r");
-  if (fp == NULL) {
-    return;
-  }
-
-  char line[MAX_COMMAND_LENGTH];
-  while (fgets(line, sizeof(line), fp) != NULL) {
-    size_t len = strlen(line);
-    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
-      line[--len] = '\0';
-    }
-
-    if (line[0] == '\0') {
-      continue;
-    }
-
-    append_history_entry(line);
-  }
-
-  fclose(fp);
+  load_history_from_file(history_path);
   g_history_unsaved_count = 0;
 }
 
@@ -1001,17 +987,9 @@ static void write_history_to_histfile_env(void) {
     return;
   }
 
-  FILE *fp = fopen(history_path, "w");
-  if (fp == NULL) {
-    return;
+  if (write_history_range_to_file(history_path, "w", 0, g_history_count)) {
+    g_history_unsaved_count = 0;
   }
-
-  for (int i = 0; i < g_history_count; i++) {
-    fprintf(fp, "%s\n", g_history[i]);
-  }
-
-  fclose(fp);
-  g_history_unsaved_count = 0;
 }
 
 // Parse command line into argv-like tokens.
