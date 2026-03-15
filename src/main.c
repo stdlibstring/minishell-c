@@ -260,6 +260,9 @@ static int collect_single_filename_match(const char *prefix, size_t prefix_len,
   struct dirent *entry;
   while ((entry = readdir(dp)) != NULL) {
     const char *name = entry->d_name;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+      continue;
+    }
     if (!starts_with(name, name_prefix, name_prefix_len)) {
       continue;
     }
