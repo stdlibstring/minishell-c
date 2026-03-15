@@ -226,7 +226,32 @@ static int collect_completion_matches(const char *prefix, size_t prefix_len,
 
 static int collect_single_filename_match(const char *prefix, size_t prefix_len,
                                          char *matched, size_t matched_size) {
-  DIR *dp = opendir(".");
+  char directory[MAX_COMMAND_LENGTH];
+  char output_prefix[MAX_COMMAND_LENGTH];
+  const char *name_prefix = prefix;
+  size_t name_prefix_len = prefix_len;
+
+  directory[0] = '.';
+  directory[1] = '\0';
+  output_prefix[0] = '\0';
+
+  const char *last_slash = strrchr(prefix, '/');
+  if (last_slash != NULL) {
+    size_t dir_len = (size_t)(last_slash - prefix + 1);
+    if (dir_len >= sizeof(directory) || dir_len >= sizeof(output_prefix)) {
+      return 0;
+    }
+
+    memcpy(directory, prefix, dir_len);
+    directory[dir_len] = '\0';
+    memcpy(output_prefix, prefix, dir_len);
+    output_prefix[dir_len] = '\0';
+
+    name_prefix = last_slash + 1;
+    name_prefix_len = prefix_len - dir_len;
+  }
+
+  DIR *dp = opendir(directory);
   if (dp == NULL) {
     return 0;
   }
@@ -235,17 +260,23 @@ static int collect_single_filename_match(const char *prefix, size_t prefix_len,
   struct dirent *entry;
   while ((entry = readdir(dp)) != NULL) {
     const char *name = entry->d_name;
-    if (!starts_with(name, prefix, prefix_len)) {
+    if (!starts_with(name, name_prefix, name_prefix_len)) {
+      continue;
+    }
+
+    char candidate[MAX_COMMAND_LENGTH];
+    if (snprintf(candidate, sizeof(candidate), "%s%s", output_prefix, name) >=
+        (int)sizeof(candidate)) {
       continue;
     }
 
     if (match_count == 0) {
-      snprintf(matched, matched_size, "%s", name);
+      snprintf(matched, matched_size, "%s", candidate);
       match_count = 1;
       continue;
     }
 
-    if (strcmp(matched, name) != 0) {
+    if (strcmp(matched, candidate) != 0) {
       match_count = 2;
       break;
     }
