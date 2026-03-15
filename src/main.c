@@ -154,6 +154,73 @@ static void free_file_completion_entries(FileCompletionEntry *entries,
   free(entries);
 }
 
+static int append_completion_span(char *line, size_t *len, size_t line_size,
+                                  const char *text, size_t from,
+                                  size_t to_exclusive) {
+  if (to_exclusive < from) {
+    return 0;
+  }
+
+  size_t add_len = to_exclusive - from;
+  if (*len + add_len >= line_size) {
+    return 0;
+  }
+
+  for (size_t i = from; i < to_exclusive; i++) {
+    line[(*len)++] = text[i];
+    putchar(text[i]);
+  }
+  line[*len] = '\0';
+  return 1;
+}
+
+static int append_completion_char(char *line, size_t *len, size_t line_size,
+                                  char ch) {
+  if (*len + 1 >= line_size) {
+    return 0;
+  }
+
+  line[(*len)++] = ch;
+  line[*len] = '\0';
+  putchar(ch);
+  return 1;
+}
+
+static void print_command_match_list(char **matches, size_t match_count,
+                                     const char *line) {
+  putchar('\n');
+  for (size_t i = 0; i < match_count; i++) {
+    if (i > 0) {
+      printf("  ");
+    }
+    printf("%s", matches[i]);
+  }
+  printf("\n$ %s", line);
+}
+
+static void print_file_match_list(FileCompletionEntry *entries,
+                                  size_t entry_count, const char *line) {
+  putchar('\n');
+  for (size_t i = 0; i < entry_count; i++) {
+    if (i > 0) {
+      printf("  ");
+    }
+    printf("%s", entries[i].text);
+    if (entries[i].is_directory) {
+      putchar('/');
+    }
+  }
+  printf("\n$ %s", line);
+}
+
+static void set_pending_completion(TabCompletionState *state,
+                                   const char *prefix, size_t prefix_len,
+                                   int first_token) {
+  memcpy(state->prefix, prefix, prefix_len + 1);
+  state->pending_list = 1;
+  state->pending_first_token = first_token;
+}
+
 static size_t common_prefix_length(const char *a, const char *b) {
   size_t i = 0;
   while (a[i] != '\0' && b[i] != '\0' && a[i] == b[i]) {
@@ -449,13 +516,8 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
       size_t lcp_len =
           longest_common_prefix_length_for_entries(entries, entry_count);
       if (lcp_len > partial_len) {
-        size_t add_len = lcp_len - partial_len;
-        if (*len + add_len < line_size) {
-          for (size_t i = partial_len; i < lcp_len; i++) {
-            line[(*len)++] = entries[0].text[i];
-            putchar(entries[0].text[i]);
-          }
-          line[*len] = '\0';
+        if (append_completion_span(line, len, line_size, entries[0].text,
+                                   partial_len, lcp_len)) {
           free_file_completion_entries(entries, entry_count);
           reset_tab_completion_state(state);
           return;
@@ -464,22 +526,10 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
 
       if (state->pending_list && !state->pending_first_token &&
           strcmp(state->prefix, current_prefix) == 0) {
-        putchar('\n');
-        for (size_t i = 0; i < entry_count; i++) {
-          if (i > 0) {
-            printf("  ");
-          }
-          printf("%s", entries[i].text);
-          if (entries[i].is_directory) {
-            putchar('/');
-          }
-        }
-        printf("\n$ %s", line);
+        print_file_match_list(entries, entry_count, line);
         reset_tab_completion_state(state);
       } else {
-        memcpy(state->prefix, current_prefix, partial_len + 1);
-        state->pending_list = 1;
-        state->pending_first_token = 0;
+        set_pending_completion(state, current_prefix, partial_len, 0);
         putchar('\a');
       }
 
@@ -491,27 +541,27 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
     int matched_is_directory = entries[0].is_directory;
 
     size_t matched_len = strlen(matched_filename);
-    size_t add_len = (matched_len - partial_len) + 1;
-    if (*len + add_len >= line_size) {
+    if (!append_completion_span(line, len, line_size, matched_filename,
+                                partial_len, matched_len)) {
       reset_tab_completion_state(state);
       free_file_completion_entries(entries, entry_count);
       return;
     }
 
-    for (size_t i = partial_len; i < matched_len; i++) {
-      line[(*len)++] = matched_filename[i];
-      putchar(matched_filename[i]);
-    }
-
     if (matched_is_directory) {
-      line[(*len)++] = '/';
-      putchar('/');
+      if (!append_completion_char(line, len, line_size, '/')) {
+        reset_tab_completion_state(state);
+        free_file_completion_entries(entries, entry_count);
+        return;
+      }
     } else {
-      line[(*len)++] = ' ';
-      putchar(' ');
+      if (!append_completion_char(line, len, line_size, ' ')) {
+        reset_tab_completion_state(state);
+        free_file_completion_entries(entries, entry_count);
+        return;
+      }
     }
 
-    line[*len] = '\0';
     reset_tab_completion_state(state);
     free_file_completion_entries(entries, entry_count);
     return;
@@ -536,13 +586,8 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
   if (match_count > 1) {
     size_t lcp_len = longest_common_prefix_length(matches, match_count);
     if (lcp_len > partial_len) {
-      size_t add_len = lcp_len - partial_len;
-      if (*len + add_len < line_size) {
-        for (size_t i = partial_len; i < lcp_len; i++) {
-          line[(*len)++] = matches[0][i];
-          putchar(matches[0][i]);
-        }
-        line[*len] = '\0';
+      if (append_completion_span(line, len, line_size, matches[0], partial_len,
+                                 lcp_len)) {
         free_matches(matches, match_count);
         reset_tab_completion_state(state);
         return;
@@ -550,19 +595,10 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
     }
 
     if (state->pending_list && strcmp(state->prefix, current_prefix) == 0) {
-      putchar('\n');
-      for (size_t i = 0; i < match_count; i++) {
-        if (i > 0) {
-          printf("  ");
-        }
-        printf("%s", matches[i]);
-      }
-      printf("\n$ %s", line);
+      print_command_match_list(matches, match_count, line);
       reset_tab_completion_state(state);
     } else {
-      memcpy(state->prefix, current_prefix, partial_len + 1);
-      state->pending_list = 1;
-      state->pending_first_token = 1;
+      set_pending_completion(state, current_prefix, partial_len, 1);
       putchar('\a');
     }
 
@@ -572,21 +608,14 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
 
   const char *matched = matches[0];
   size_t matched_len = strlen(matched);
-  size_t add_len = (matched_len - partial_len) + 1; // + trailing space
-  if (*len + add_len >= line_size) {
+  if (!append_completion_span(line, len, line_size, matched, partial_len,
+                              matched_len) ||
+      !append_completion_char(line, len, line_size, ' ')) {
     free_matches(matches, match_count);
     reset_tab_completion_state(state);
     return;
   }
 
-  // Print only appended characters to emulate shell live completion.
-  for (size_t i = partial_len; i < matched_len; i++) {
-    line[(*len)++] = matched[i];
-    putchar(matched[i]);
-  }
-  line[(*len)++] = ' ';
-  putchar(' ');
-  line[*len] = '\0';
   free_matches(matches, match_count);
   reset_tab_completion_state(state);
 }
