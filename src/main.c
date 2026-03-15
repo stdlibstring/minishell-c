@@ -10,12 +10,20 @@
 #define MAX_COMMAND_LENGTH 256
 #define MAX_ARGS 128
 
+// Treat only space and tab as argument separators in this stage.
 static int is_inline_whitespace(char c) { return c == ' ' || c == '\t'; }
 
+static int starts_with(const char *text, const char *prefix,
+                       size_t prefix_len) {
+  return strncmp(text, prefix, prefix_len) == 0;
+}
+
+// In double quotes, only these two escape targets are handled for now.
 static int is_escapable_in_double_quotes(char c) {
   return c == '"' || c == '\\';
 }
 
+// Parsed redirection intent for one command line.
 typedef struct {
   char *stdout_file;
   int stdout_append;
@@ -23,6 +31,7 @@ typedef struct {
   int stderr_append;
 } RedirectionSpec;
 
+// Saved original descriptors so they can be restored after command execution.
 typedef struct {
   int saved_stdout;
   int saved_stderr;
@@ -30,12 +39,71 @@ typedef struct {
 
 static void restore_fd(int saved_fd, int target_fd);
 
+// Complete command name when user presses TAB.
+// For this stage, only "echo" and "exit" are candidates.
+static void autocomplete_builtin_on_tab(char *line, size_t line_size) {
+  char *tab = strchr(line, '\t');
+  if (tab == NULL) {
+    return;
+  }
+
+  char *word_start = line;
+  while (*word_start == ' ') {
+    word_start++;
+  }
+
+  char *word_end = word_start;
+  while (*word_end != '\0' && *word_end != ' ' && *word_end != '\t' &&
+         *word_end != '\r' && *word_end != '\n') {
+    word_end++;
+  }
+
+  // Only handle TAB immediately after the first command word.
+  if (word_end != tab || word_start == tab) {
+    return;
+  }
+
+  static const char *candidates[] = {"echo", "exit"};
+  size_t partial_len = (size_t)(tab - word_start);
+  const char *matched = NULL;
+  int match_count = 0;
+
+  for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+    if (starts_with(candidates[i], word_start, partial_len)) {
+      matched = candidates[i];
+      match_count++;
+    }
+  }
+
+  if (match_count != 1) {
+    return;
+  }
+
+  char rebuilt[MAX_COMMAND_LENGTH];
+  size_t prefix_len = (size_t)(word_start - line);
+  size_t matched_len = strlen(matched);
+  size_t suffix_len = strlen(tab + 1);
+
+  if (prefix_len + matched_len + 1 + suffix_len + 1 > line_size) {
+    return;
+  }
+
+  memcpy(rebuilt, line, prefix_len);
+  memcpy(rebuilt + prefix_len, matched, matched_len);
+  rebuilt[prefix_len + matched_len] = ' ';
+  memcpy(rebuilt + prefix_len + matched_len + 1, tab + 1, suffix_len + 1);
+
+  memcpy(line, rebuilt, prefix_len + matched_len + 1 + suffix_len + 1);
+}
+
+// Builtins currently supported by this shell.
 static int is_builtin(const char *cmd) {
   return strcmp(cmd, "echo") == 0 || strcmp(cmd, "type") == 0 ||
          strcmp(cmd, "exit") == 0 || strcmp(cmd, "pwd") == 0 ||
          strcmp(cmd, "cd") == 0;
 }
 
+// Search PATH for an executable file and return its absolute path.
 static int find_executable_in_path(const char *name, char *out_path,
                                    size_t out_path_size) {
   if (name == NULL || *name == '\0') {
@@ -72,6 +140,7 @@ static int find_executable_in_path(const char *name, char *out_path,
   return 0;
 }
 
+// Implementation of the "type" builtin.
 static void handle_type(const char *name) {
   if (name == NULL || *name == '\0') {
     printf("type: missing operand\r\n");
@@ -93,6 +162,7 @@ static void handle_type(const char *name) {
   printf("%s: not found\r\n", name);
 }
 
+// Implementation of the "cd" builtin (supports ~ via HOME).
 static void handle_cd(const char *path) {
   if (path == NULL || *path == '\0') {
     return;
@@ -112,6 +182,12 @@ static void handle_cd(const char *path) {
   }
 }
 
+// Parse command line into argv-like tokens.
+// Rules implemented here:
+// - Whitespace separates arguments when outside quotes.
+// - Single and double quotes remove delimiter meaning.
+// - Adjacent quoted/unquoted segments are concatenated.
+// - Backslash escaping is supported per current stage requirements.
 static int parse_arguments(char *line, char **args, int max_args) {
   char *read = line;
   char *write = line;
@@ -185,6 +261,15 @@ static int parse_arguments(char *line, char **args, int max_args) {
   return arg_count;
 }
 
+// Split parsed tokens into:
+// 1) command arguments that should be passed to exec/builtin
+// 2) redirection targets/modes for stdout and stderr
+//
+// Supported redirection forms:
+// - stdout overwrite: > file, 1> file, >file, 1>file
+// - stdout append:    >> file, 1>> file, >>file, 1>>file
+// - stderr overwrite: 2> file, 2>file
+// - stderr append:    2>> file, 2>>file
 static int split_command_and_redirections(char **args, int arg_count,
                                           char **command_args, int max_args,
                                           RedirectionSpec *redir) {
@@ -279,6 +364,7 @@ static int split_command_and_redirections(char **args, int arg_count,
   return command_arg_count;
 }
 
+// Redirect one descriptor to file and return a saved copy of the original fd.
 static int redirect_fd_to_file(int fd_to_redirect, const char *path,
                                int append) {
   int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
@@ -303,6 +389,8 @@ static int redirect_fd_to_file(int fd_to_redirect, const char *path,
   return saved_fd;
 }
 
+// Apply parsed redirections before command execution.
+// On failure, any already-applied redirection is rolled back.
 static int apply_redirections(const RedirectionSpec *redir,
                               SavedDescriptors *saved) {
   saved->saved_stdout = -1;
@@ -331,6 +419,7 @@ static int apply_redirections(const RedirectionSpec *redir,
   return 0;
 }
 
+// Restore descriptors after the command finishes.
 static void restore_redirections(SavedDescriptors *saved) {
   if (saved->saved_stderr >= 0) {
     restore_fd(saved->saved_stderr, STDERR_FILENO);
@@ -343,6 +432,7 @@ static void restore_redirections(SavedDescriptors *saved) {
   }
 }
 
+// Restore one descriptor from a saved copy.
 static void restore_fd(int saved_fd, int target_fd) {
   if (target_fd == STDOUT_FILENO) {
     fflush(stdout);
@@ -354,6 +444,7 @@ static void restore_fd(int saved_fd, int target_fd) {
   close(saved_fd);
 }
 
+// Implementation of the "echo" builtin.
 static void handle_echo(char **args, int arg_count) {
   for (int i = 1; i < arg_count; i++) {
     if (i > 1) {
@@ -364,6 +455,7 @@ static void handle_echo(char **args, int arg_count) {
   printf("\r\n");
 }
 
+// Implementation of the "pwd" builtin.
 static void handle_pwd(void) {
   char cwd[PATH_MAX];
   if (getcwd(cwd, sizeof(cwd)) != NULL) {
@@ -373,6 +465,7 @@ static void handle_pwd(void) {
   }
 }
 
+// Execute a non-builtin command by searching PATH and using fork/exec.
 static void execute_external_command(char **args) {
   char full_path[PATH_MAX];
   if (!find_executable_in_path(args[0], full_path, sizeof(full_path))) {
@@ -391,6 +484,8 @@ static void execute_external_command(char **args) {
   }
 }
 
+// Dispatch one parsed command to builtin/external handlers.
+// Return 1 if shell should exit, otherwise 0.
 static int execute_command(char **args, int arg_count) {
   char *cmd = args[0];
 
@@ -429,6 +524,7 @@ int main(int argc, char *argv[]) {
   // Flush after every printf
   setbuf(stdout, NULL);
 
+  // REPL loop: prompt -> read -> parse -> redirect -> execute -> restore.
   char command[MAX_COMMAND_LENGTH];
   while (1) {
     printf("$ ");
@@ -436,8 +532,12 @@ int main(int argc, char *argv[]) {
       break;
     }
 
+    autocomplete_builtin_on_tab(command, sizeof(command));
+
     // 去除多余的换行符
     command[strcspn(command, "\r\n")] = 0;
+
+    // 1) Tokenize command line into raw shell arguments.
     char *args[MAX_ARGS];
     int arg_count = parse_arguments(command, args, MAX_ARGS);
     char *command_args[MAX_ARGS];
@@ -448,18 +548,22 @@ int main(int argc, char *argv[]) {
       continue; // 如果没有输入命令，继续下一轮循环
     }
 
+    // 2) Separate redirection operators from command arguments.
     int command_arg_count = split_command_and_redirections(
         args, arg_count, command_args, MAX_ARGS, &redir);
     if (command_arg_count <= 0) {
       continue;
     }
 
+    // 3) Apply fd redirections before executing the command.
     if (apply_redirections(&redir, &saved) < 0) {
       continue;
     }
 
+    // 4) Execute builtin/external command.
     int should_exit = execute_command(command_args, command_arg_count);
 
+    // 5) Always restore stdout/stderr for the next prompt.
     restore_redirections(&saved);
 
     if (should_exit) {
