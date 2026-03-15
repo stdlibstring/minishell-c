@@ -9,6 +9,16 @@
 #include <termios.h>
 #include <unistd.h>
 
+/*
+ * Single-file shell for the CodeCrafters Shell challenge.
+ *
+ * Main modules implemented in this file:
+ * - Interactive input: raw mode, backspace, arrows, TAB completion
+ * - Parsing: quoting/escaping, argument splitting, redirection parsing
+ * - Execution: builtins, PATH lookup, external process launch, pipelines
+ * - History: in-memory ring buffer + file load/save/append semantics
+ */
+
 #define MAX_COMMAND_LENGTH 256
 #define MAX_ARGS 128
 #define MAX_HISTORY 1024
@@ -16,6 +26,14 @@
 static const char *k_builtin_completion_candidates[] = {"echo", "exit"};
 static char g_history[MAX_HISTORY][MAX_COMMAND_LENGTH];
 static int g_history_count = 0;
+
+/*
+ * Count of entries that were added in memory but not yet persisted.
+ *
+ * Used by history -a to append only the delta since last successful save.
+ * This counter is intentionally capped at MAX_HISTORY to stay compatible with
+ * fixed-size history storage and rollover behavior.
+ */
 static int g_history_unsaved_count = 0;
 
 // Treat only space and tab as argument separators in this stage.
@@ -109,10 +127,12 @@ static void history_navigate_down(char *line, size_t line_size, size_t *len,
 }
 
 static void append_history_entry(const char *command) {
+  /* Reject empty commands so history stays meaningful and compact. */
   if (command == NULL || *command == '\0') {
     return;
   }
 
+  /* Normal append path while there is spare capacity. */
   if (g_history_count < MAX_HISTORY) {
     snprintf(g_history[g_history_count], MAX_COMMAND_LENGTH, "%s", command);
     g_history_count++;
@@ -122,6 +142,7 @@ static void append_history_entry(const char *command) {
     return;
   }
 
+  /* Buffer full: drop oldest entry and shift left by one slot. */
   for (int i = 1; i < MAX_HISTORY; i++) {
     snprintf(g_history[i - 1], MAX_COMMAND_LENGTH, "%s", g_history[i]);
   }
@@ -132,6 +153,7 @@ static void append_history_entry(const char *command) {
 }
 
 static void trim_line_endings(char *line) {
+  /* Normalize both LF and CRLF endings when loading from files. */
   size_t len = strlen(line);
   while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
     line[--len] = '\0';
@@ -140,11 +162,13 @@ static void trim_line_endings(char *line) {
 
 static int write_history_range_to_file(const char *path, const char *mode,
                                        int start, int end) {
+  /* mode should be "a" (append) or "w" (overwrite). */
   FILE *fp = fopen(path, mode);
   if (fp == NULL) {
     return 0;
   }
 
+  /* Persist one command per line, always with trailing newline. */
   for (int i = start; i < end; i++) {
     fprintf(fp, "%s\n", g_history[i]);
   }
@@ -154,6 +178,7 @@ static int write_history_range_to_file(const char *path, const char *mode,
 }
 
 static void load_history_from_file(const char *path) {
+  /* Missing files are treated as "no history yet" rather than an error. */
   FILE *fp = fopen(path, "r");
   if (fp == NULL) {
     return;
@@ -162,6 +187,7 @@ static void load_history_from_file(const char *path) {
   char line[MAX_COMMAND_LENGTH];
   while (fgets(line, sizeof(line), fp) != NULL) {
     trim_line_endings(line);
+    /* Ignore blank lines so in-memory history stores commands only. */
     if (line[0] == '\0') {
       continue;
     }
@@ -780,6 +806,7 @@ static int read_command_line(char *line, size_t line_size) {
     char ch = '\0';
     ssize_t n = read(STDIN_FILENO, &ch, 1);
     if (n <= 0) {
+      /* EOF / read failure exits interactive loop in main(). */
       return -1;
     }
 
@@ -795,6 +822,7 @@ static int read_command_line(char *line, size_t line_size) {
     }
 
     if (ch == 27) {
+      /* Parse a minimal ANSI escape sequence for arrow keys. */
       char seq1 = '\0';
       char seq2 = '\0';
       if (!read_escape_suffix(&seq1, &seq2)) {
@@ -929,6 +957,7 @@ static void handle_cd(const char *path) {
 }
 
 static void handle_history(char **args, int arg_count) {
+  /* history -a <path>: append only unsaved commands. */
   if (arg_count == 3 && strcmp(args[1], "-a") == 0) {
     int start = g_history_count - g_history_unsaved_count;
     if (start < 0) {
@@ -941,6 +970,7 @@ static void handle_history(char **args, int arg_count) {
     return;
   }
 
+  /* history -w <path>: overwrite with complete in-memory history. */
   if (arg_count == 3 && strcmp(args[1], "-w") == 0) {
     if (write_history_range_to_file(args[2], "w", 0, g_history_count)) {
       g_history_unsaved_count = 0;
@@ -948,6 +978,7 @@ static void handle_history(char **args, int arg_count) {
     return;
   }
 
+  /* history -r <path>: import entries from file into current session. */
   if (arg_count == 3 && strcmp(args[1], "-r") == 0) {
     load_history_from_file(args[2]);
     return;
@@ -972,16 +1003,20 @@ static void handle_history(char **args, int arg_count) {
 }
 
 static void load_history_from_histfile_env(void) {
+  /* HISTFILE controls startup restore source. */
   const char *history_path = getenv("HISTFILE");
   if (history_path == NULL || *history_path == '\0') {
     return;
   }
 
   load_history_from_file(history_path);
+
+  /* Loaded data already exists on disk, so unsaved delta must be zero. */
   g_history_unsaved_count = 0;
 }
 
 static void write_history_to_histfile_env(void) {
+  /* HISTFILE controls exit-time save destination. */
   const char *history_path = getenv("HISTFILE");
   if (history_path == NULL || *history_path == '\0') {
     return;
@@ -1340,6 +1375,7 @@ static int run_builtin_command(char **args, int arg_count, int *should_exit) {
   char *cmd = args[0];
 
   if (strcmp(cmd, "exit") == 0) {
+    /* Main loop performs the actual teardown/persistence before break. */
     if (should_exit != NULL) {
       *should_exit = 1;
     }
@@ -1434,6 +1470,7 @@ static int split_pipeline_commands(char **args, int arg_count, char ***commands,
 }
 
 static int execute_pipeline(char **args, int arg_count) {
+  /* Convert argv with separators into N null-terminated command vectors. */
   char **commands[MAX_ARGS];
   int command_count = 0;
   if (!split_pipeline_commands(args, arg_count, commands, &command_count)) {
@@ -1460,6 +1497,7 @@ static int execute_pipeline(char **args, int arg_count) {
 
     pid_t pid = fork();
     if (pid == 0) {
+      /* Child process: attach pipe ends, then run builtin or external cmd. */
       if (prev_read_fd >= 0) {
         dup2(prev_read_fd, STDIN_FILENO);
       }
@@ -1560,6 +1598,8 @@ int main(int argc, char *argv[]) {
     int arg_count = parse_arguments(command, args, MAX_ARGS);
 
     if (arg_count > 0) {
+      /* Record typed command before execution (includes history/exit itself).
+       */
       append_history_entry(raw_command);
     }
 
@@ -1574,7 +1614,7 @@ int main(int argc, char *argv[]) {
     SavedDescriptors saved;
 
     if (arg_count == 0) {
-      continue; // 如果没有输入命令，继续下一轮循环
+      continue; 
     }
 
     // 2) Separate redirection operators from command arguments.
@@ -1596,6 +1636,7 @@ int main(int argc, char *argv[]) {
     restore_redirections(&saved);
 
     if (should_exit) {
+      /* Persist history snapshot on normal exit path. */
       write_history_to_histfile_env();
       break;
     }
