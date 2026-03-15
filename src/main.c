@@ -15,6 +15,10 @@ int main(int argc, char *argv[]) {
 
     // 去除多余的换行符
     command[strcspn(command, "\r\n")] = 0;
+
+    if(strcmp(command, "exit") == 0) {
+      break;
+    }
     printf("%s: command not found\r\n", command);
   }
   
