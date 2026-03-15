@@ -39,37 +39,32 @@ typedef struct {
 
 static void restore_fd(int saved_fd, int target_fd);
 
-// Complete command name when user presses TAB.
-// For this stage, only "echo" and "exit" are candidates.
-static void autocomplete_builtin_on_tab(char *line, size_t line_size) {
-  char *tab = strchr(line, '\t');
-  if (tab == NULL) {
-    return;
-  }
-
-  char *word_start = line;
-  while (*word_start == ' ') {
+// Try to autocomplete the first command word when TAB is pressed.
+// Only "echo" and "exit" are considered in this stage.
+static void autocomplete_builtin_live(char *line, size_t *len,
+                                      size_t line_size) {
+  size_t word_start = 0;
+  while (word_start < *len && line[word_start] == ' ') {
     word_start++;
   }
 
-  char *word_end = word_start;
-  while (*word_end != '\0' && *word_end != ' ' && *word_end != '\t' &&
-         *word_end != '\r' && *word_end != '\n') {
+  size_t word_end = word_start;
+  while (word_end < *len && line[word_end] != ' ' && line[word_end] != '\t') {
     word_end++;
   }
 
-  // Only handle TAB immediately after the first command word.
-  if (word_end != tab || word_start == tab) {
+  // Only complete when cursor is still on the first word.
+  if (word_end != *len || word_start == word_end) {
     return;
   }
 
   static const char *candidates[] = {"echo", "exit"};
-  size_t partial_len = (size_t)(tab - word_start);
+  size_t partial_len = word_end - word_start;
   const char *matched = NULL;
   int match_count = 0;
 
   for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
-    if (starts_with(candidates[i], word_start, partial_len)) {
+    if (starts_with(candidates[i], line + word_start, partial_len)) {
       matched = candidates[i];
       match_count++;
     }
@@ -79,21 +74,64 @@ static void autocomplete_builtin_on_tab(char *line, size_t line_size) {
     return;
   }
 
-  char rebuilt[MAX_COMMAND_LENGTH];
-  size_t prefix_len = (size_t)(word_start - line);
   size_t matched_len = strlen(matched);
-  size_t suffix_len = strlen(tab + 1);
-
-  if (prefix_len + matched_len + 1 + suffix_len + 1 > line_size) {
+  size_t add_len = (matched_len - partial_len) + 1; // + trailing space
+  if (*len + add_len >= line_size) {
     return;
   }
 
-  memcpy(rebuilt, line, prefix_len);
-  memcpy(rebuilt + prefix_len, matched, matched_len);
-  rebuilt[prefix_len + matched_len] = ' ';
-  memcpy(rebuilt + prefix_len + matched_len + 1, tab + 1, suffix_len + 1);
+  // Print only appended characters to emulate shell live completion.
+  for (size_t i = partial_len; i < matched_len; i++) {
+    line[(*len)++] = matched[i];
+    putchar(matched[i]);
+  }
+  line[(*len)++] = ' ';
+  putchar(' ');
+  line[*len] = '\0';
+}
 
-  memcpy(line, rebuilt, prefix_len + matched_len + 1 + suffix_len + 1);
+// Read one command line from stdin in a key-by-key fashion so TAB completion
+// can happen immediately after the key press.
+static int read_command_line(char *line, size_t line_size) {
+  size_t len = 0;
+  line[0] = '\0';
+
+  while (1) {
+    char ch = '\0';
+    ssize_t n = read(STDIN_FILENO, &ch, 1);
+    if (n <= 0) {
+      return -1;
+    }
+
+    if (ch == '\n' || ch == '\r') {
+      putchar('\n');
+      line[len] = '\0';
+      return (int)len;
+    }
+
+    if (ch == '\t') {
+      autocomplete_builtin_live(line, &len, line_size);
+      continue;
+    }
+
+    // Basic backspace support for interactive editing.
+    if (ch == 127 || ch == '\b') {
+      if (len > 0) {
+        len--;
+        line[len] = '\0';
+        printf("\b \b");
+      }
+      continue;
+    }
+
+    if (len + 1 >= line_size) {
+      continue;
+    }
+
+    line[len++] = ch;
+    line[len] = '\0';
+    putchar(ch);
+  }
 }
 
 // Builtins currently supported by this shell.
@@ -528,14 +566,9 @@ int main(int argc, char *argv[]) {
   char command[MAX_COMMAND_LENGTH];
   while (1) {
     printf("$ ");
-    if (fgets(command, sizeof(command), stdin) == NULL) {
+    if (read_command_line(command, sizeof(command)) < 0) {
       break;
     }
-
-    autocomplete_builtin_on_tab(command, sizeof(command));
-
-    // 去除多余的换行符
-    command[strcspn(command, "\r\n")] = 0;
 
     // 1) Tokenize command line into raw shell arguments.
     char *args[MAX_ARGS];
