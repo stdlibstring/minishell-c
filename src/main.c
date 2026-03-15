@@ -86,6 +86,48 @@ static void handle_cd(const char *path) {
   }
 }
 
+static int parse_arguments(char *line, char **args, int max_args) {
+  char *read = line;
+  char *write = line;
+  int arg_count = 0;
+
+  while (*read != '\0') {
+    while (*read == ' ' || *read == '\t') {
+      read++;
+    }
+
+    if (*read == '\0') {
+      break;
+    }
+
+    if (arg_count >= max_args - 1) {
+      break;
+    }
+
+    args[arg_count++] = write;
+    int in_single_quote = 0;
+
+    while (*read != '\0') {
+      if (*read == '\'') {
+        in_single_quote = !in_single_quote;
+        read++;
+        continue;
+      }
+
+      if (!in_single_quote && (*read == ' ' || *read == '\t')) {
+        break;
+      }
+
+      *write++ = *read++;
+    }
+
+    *write++ = '\0';
+  }
+
+  args[arg_count] = NULL;
+  return arg_count;
+}
+
 int main(int argc, char *argv[]) {
   // Flush after every printf
   setbuf(stdout, NULL);
@@ -100,14 +142,7 @@ int main(int argc, char *argv[]) {
     // 去除多余的换行符
     command[strcspn(command, "\r\n")] = 0;
     char *args[128];
-    int arg_count = 0;
-
-    char *token = strtok(command, " \t");
-    while (token != NULL && arg_count < 127) {
-      args[arg_count++] = token;
-      token = strtok(NULL, " \t");
-    }
-    args[arg_count] = NULL;
+    int arg_count = parse_arguments(command, args, 128);
 
     if (arg_count == 0) {
       continue; // 如果没有输入命令，继续下一轮循环
