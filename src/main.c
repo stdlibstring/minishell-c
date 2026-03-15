@@ -573,14 +573,14 @@ static int parse_inline_redirection_token(char *token, int *fd, int *append,
     return 1;
   }
 
-  if (strncmp(token, "1>", 2) == 0 && token[2] != '\0') {
+  if (strncmp(token, "1>", 2) == 0 && token[2] != '\0' && token[2] != '>') {
     *fd = STDOUT_FILENO;
     *append = 0;
     *target = token + 2;
     return 1;
   }
 
-  if (strncmp(token, "2>", 2) == 0 && token[2] != '\0') {
+  if (strncmp(token, "2>", 2) == 0 && token[2] != '\0' && token[2] != '>') {
     *fd = STDERR_FILENO;
     *append = 0;
     *target = token + 2;
