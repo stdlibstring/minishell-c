@@ -53,6 +53,60 @@ static void redraw_prompt_line(const char *line, size_t len,
   }
 }
 
+static int read_escape_suffix(char *seq1, char *seq2) {
+  if (read(STDIN_FILENO, seq1, 1) <= 0 || read(STDIN_FILENO, seq2, 1) <= 0) {
+    return 0;
+  }
+  return 1;
+}
+
+static void apply_history_selection(char *line, size_t line_size, size_t *len,
+                                    const char *selected_line) {
+  size_t previous_len = *len;
+  snprintf(line, line_size, "%s", selected_line);
+  *len = strlen(line);
+  redraw_prompt_line(line, *len, previous_len);
+}
+
+static void history_navigate_up(char *line, size_t line_size, size_t *len,
+                                int *history_index, char *history_draft,
+                                size_t history_draft_size,
+                                size_t *history_draft_len) {
+  if (g_history_count == 0) {
+    return;
+  }
+
+  if (*history_index == g_history_count) {
+    snprintf(history_draft, history_draft_size, "%s", line);
+    *history_draft_len = *len;
+  }
+
+  if (*history_index > 0) {
+    (*history_index)--;
+  }
+
+  apply_history_selection(line, line_size, len, g_history[*history_index]);
+}
+
+static void history_navigate_down(char *line, size_t line_size, size_t *len,
+                                  int *history_index, const char *history_draft,
+                                  size_t history_draft_len) {
+  if (*history_index >= g_history_count) {
+    return;
+  }
+
+  (*history_index)++;
+  if (*history_index == g_history_count) {
+    size_t previous_len = *len;
+    snprintf(line, line_size, "%s", history_draft);
+    *len = history_draft_len;
+    redraw_prompt_line(line, *len, previous_len);
+    return;
+  }
+
+  apply_history_selection(line, line_size, len, g_history[*history_index]);
+}
+
 static void append_history_entry(const char *command) {
   if (command == NULL || *command == '\0') {
     return;
@@ -696,49 +750,22 @@ static int read_command_line(char *line, size_t line_size) {
     if (ch == 27) {
       char seq1 = '\0';
       char seq2 = '\0';
-      if (read(STDIN_FILENO, &seq1, 1) <= 0 ||
-          read(STDIN_FILENO, &seq2, 1) <= 0) {
+      if (!read_escape_suffix(&seq1, &seq2)) {
         continue;
       }
 
       if (seq1 == '[' && seq2 == 'A') {
-        if (g_history_count == 0) {
-          continue;
-        }
-
-        if (history_index == g_history_count) {
-          snprintf(history_draft, sizeof(history_draft), "%s", line);
-          history_draft_len = len;
-        }
-
-        if (history_index > 0) {
-          history_index--;
-        }
-
-        size_t previous_len = len;
-        snprintf(line, line_size, "%s", g_history[history_index]);
-        len = strlen(line);
-        redraw_prompt_line(line, len, previous_len);
+        history_navigate_up(line, line_size, &len, &history_index,
+                            history_draft, sizeof(history_draft),
+                            &history_draft_len);
         reset_tab_completion_state(&tab_state);
         continue;
       }
 
       if (seq1 == '[' && seq2 == 'B') {
-        if (history_index < g_history_count) {
-          size_t previous_len = len;
-          history_index++;
-
-          if (history_index == g_history_count) {
-            snprintf(line, line_size, "%s", history_draft);
-            len = history_draft_len;
-          } else {
-            snprintf(line, line_size, "%s", g_history[history_index]);
-            len = strlen(line);
-          }
-
-          redraw_prompt_line(line, len, previous_len);
-          reset_tab_completion_state(&tab_state);
-        }
+        history_navigate_down(line, line_size, &len, &history_index,
+                              history_draft, history_draft_len);
+        reset_tab_completion_state(&tab_state);
         continue;
       }
 
@@ -855,6 +882,30 @@ static void handle_cd(const char *path) {
 }
 
 static void handle_history(char **args, int arg_count) {
+  if (arg_count == 3 && strcmp(args[1], "-r") == 0) {
+    FILE *fp = fopen(args[2], "r");
+    if (fp == NULL) {
+      return;
+    }
+
+    char line[MAX_COMMAND_LENGTH];
+    while (fgets(line, sizeof(line), fp) != NULL) {
+      size_t len = strlen(line);
+      while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+        line[--len] = '\0';
+      }
+
+      if (line[0] == '\0') {
+        continue;
+      }
+
+      append_history_entry(line);
+    }
+
+    fclose(fp);
+    return;
+  }
+
   int start = 0;
 
   if (arg_count > 1) {
