@@ -108,15 +108,23 @@ static int parse_arguments(char *line, char **args, int max_args) {
 
     args[arg_count++] = write;
     int in_single_quote = 0;
+    int in_double_quote = 0;
 
     while (*read != '\0') {
-      if (*read == '\'') {
+      if (*read == '\'' && !in_double_quote) {
         in_single_quote = !in_single_quote;
         read++;
         continue;
       }
 
-      if (!in_single_quote && (*read == ' ' || *read == '\t')) {
+      if (*read == '"' && !in_single_quote) {
+        in_double_quote = !in_double_quote;
+        read++;
+        continue;
+      }
+
+      if (!in_single_quote && !in_double_quote &&
+          (*read == ' ' || *read == '\t')) {
         while (*read == ' ' || *read == '\t') {
           read++;
         }
