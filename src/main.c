@@ -226,7 +226,8 @@ static int collect_completion_matches(const char *prefix, size_t prefix_len,
 
 static int collect_single_filename_match(const char *prefix, size_t prefix_len,
                                          char *matched, size_t matched_size,
-                                         int *matched_is_directory) {
+                                         int *matched_is_directory,
+                                         int *out_match_count) {
   char directory[MAX_COMMAND_LENGTH];
   char output_prefix[MAX_COMMAND_LENGTH];
   const char *name_prefix = prefix;
@@ -294,6 +295,7 @@ static int collect_single_filename_match(const char *prefix, size_t prefix_len,
   if (match_count == 1) {
     *matched_is_directory = single_is_directory;
   }
+  *out_match_count = match_count;
   return match_count == 1;
 }
 
@@ -369,9 +371,14 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
   if (!first_token) {
     char matched_filename[MAX_COMMAND_LENGTH];
     int matched_is_directory = 0;
+    int file_match_count = 0;
     if (!collect_single_filename_match(
             current_prefix, partial_len, matched_filename,
-            sizeof(matched_filename), &matched_is_directory)) {
+            sizeof(matched_filename), &matched_is_directory,
+            &file_match_count)) {
+      if (file_match_count == 0) {
+        putchar('\a');
+      }
       reset_tab_completion_state(state);
       return;
     }
