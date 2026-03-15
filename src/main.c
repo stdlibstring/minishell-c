@@ -1085,6 +1085,76 @@ static void execute_external_command(char **args) {
   }
 }
 
+static void exec_external_in_child(char **args) {
+  char full_path[PATH_MAX];
+  if (!find_executable_in_path(args[0], full_path, sizeof(full_path))) {
+    fprintf(stderr, "%s: command not found\n", args[0]);
+    _exit(127);
+  }
+
+  execv(full_path, args);
+  _exit(1);
+}
+
+static int find_pipe_token_index(char **args, int arg_count) {
+  for (int i = 0; i < arg_count; i++) {
+    if (strcmp(args[i], "|") == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static int execute_two_command_pipeline(char **args, int arg_count,
+                                        int pipe_index) {
+  if (pipe_index <= 0 || pipe_index >= arg_count - 1) {
+    return 0;
+  }
+
+  args[pipe_index] = NULL;
+  char **left_args = args;
+  char **right_args = &args[pipe_index + 1];
+
+  int pipefd[2];
+  if (pipe(pipefd) != 0) {
+    return 0;
+  }
+
+  pid_t left_pid = fork();
+  if (left_pid == 0) {
+    dup2(pipefd[1], STDOUT_FILENO);
+    close(pipefd[0]);
+    close(pipefd[1]);
+    exec_external_in_child(left_args);
+  }
+
+  if (left_pid < 0) {
+    close(pipefd[0]);
+    close(pipefd[1]);
+    return 0;
+  }
+
+  pid_t right_pid = fork();
+  if (right_pid == 0) {
+    dup2(pipefd[0], STDIN_FILENO);
+    close(pipefd[1]);
+    close(pipefd[0]);
+    exec_external_in_child(right_args);
+  }
+
+  close(pipefd[0]);
+  close(pipefd[1]);
+
+  if (right_pid < 0) {
+    waitpid(left_pid, NULL, 0);
+    return 0;
+  }
+
+  waitpid(left_pid, NULL, 0);
+  waitpid(right_pid, NULL, 0);
+  return 1;
+}
+
 // Dispatch one parsed command to builtin/external handlers.
 // Return 1 if shell should exit, otherwise 0.
 static int execute_command(char **args, int arg_count) {
@@ -1141,6 +1211,13 @@ int main(int argc, char *argv[]) {
     // 1) Tokenize command line into raw shell arguments.
     char *args[MAX_ARGS];
     int arg_count = parse_arguments(command, args, MAX_ARGS);
+
+    int pipe_index = find_pipe_token_index(args, arg_count);
+    if (pipe_index >= 0) {
+      execute_two_command_pipeline(args, arg_count, pipe_index);
+      continue;
+    }
+
     char *command_args[MAX_ARGS];
     RedirectionSpec redir;
     SavedDescriptors saved;
