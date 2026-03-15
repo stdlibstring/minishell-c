@@ -28,7 +28,7 @@ int main(int argc, char *argv[]) {
       } else if(strcmp(command + 5, "type") == 0) {
         printf("type is a shell builtin\r\n");
       } else {
-        printf("%s: not found\r\n", command);
+        printf("%s: not found\r\n", command + 5);
       }
     } else {
       printf("%s: command not found\r\n", command);
