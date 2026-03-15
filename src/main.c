@@ -966,6 +966,35 @@ static void handle_history(char **args, int arg_count) {
   }
 }
 
+static void load_history_from_histfile_env(void) {
+  const char *history_path = getenv("HISTFILE");
+  if (history_path == NULL || *history_path == '\0') {
+    return;
+  }
+
+  FILE *fp = fopen(history_path, "r");
+  if (fp == NULL) {
+    return;
+  }
+
+  char line[MAX_COMMAND_LENGTH];
+  while (fgets(line, sizeof(line), fp) != NULL) {
+    size_t len = strlen(line);
+    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+      line[--len] = '\0';
+    }
+
+    if (line[0] == '\0') {
+      continue;
+    }
+
+    append_history_entry(line);
+  }
+
+  fclose(fp);
+  g_history_unsaved_count = 0;
+}
+
 // Parse command line into argv-like tokens.
 // Rules implemented here:
 // - Whitespace separates arguments when outside quotes.
@@ -1515,6 +1544,8 @@ int main(int argc, char *argv[]) {
 
   // Flush after every printf
   setbuf(stdout, NULL);
+
+  load_history_from_histfile_env();
 
   // REPL loop: prompt -> read -> parse -> redirect -> execute -> restore.
   char command[MAX_COMMAND_LENGTH];
