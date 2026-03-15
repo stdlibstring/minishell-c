@@ -1085,6 +1085,43 @@ static void execute_external_command(char **args) {
   }
 }
 
+static int run_builtin_command(char **args, int arg_count, int *should_exit) {
+  if (args == NULL || args[0] == NULL) {
+    return 0;
+  }
+
+  char *cmd = args[0];
+
+  if (strcmp(cmd, "exit") == 0) {
+    if (should_exit != NULL) {
+      *should_exit = 1;
+    }
+    return 1;
+  }
+
+  if (strcmp(cmd, "echo") == 0) {
+    handle_echo(args, arg_count);
+    return 1;
+  }
+
+  if (strcmp(cmd, "pwd") == 0) {
+    handle_pwd();
+    return 1;
+  }
+
+  if (strcmp(cmd, "cd") == 0) {
+    handle_cd(arg_count > 1 ? args[1] : NULL);
+    return 1;
+  }
+
+  if (strcmp(cmd, "type") == 0) {
+    handle_type(arg_count > 1 ? args[1] : NULL);
+    return 1;
+  }
+
+  return 0;
+}
+
 static void exec_external_in_child(char **args) {
   char full_path[PATH_MAX];
   if (!find_executable_in_path(args[0], full_path, sizeof(full_path))) {
@@ -1105,6 +1142,54 @@ static int find_pipe_token_index(char **args, int arg_count) {
   return -1;
 }
 
+static int count_command_args(char **args) {
+  int count = 0;
+  while (args[count] != NULL) {
+    count++;
+  }
+  return count;
+}
+
+static void run_builtin_with_redirected_stdio(char **args, int arg_count,
+                                              int input_fd, int output_fd) {
+  int saved_stdin = -1;
+  int saved_stdout = -1;
+
+  if (input_fd >= 0) {
+    saved_stdin = dup(STDIN_FILENO);
+    dup2(input_fd, STDIN_FILENO);
+  }
+
+  if (output_fd >= 0) {
+    saved_stdout = dup(STDOUT_FILENO);
+    dup2(output_fd, STDOUT_FILENO);
+  }
+
+  int ignored_exit = 0;
+  run_builtin_command(args, arg_count, &ignored_exit);
+
+  if (saved_stdout >= 0) {
+    restore_fd(saved_stdout, STDOUT_FILENO);
+  }
+  if (saved_stdin >= 0) {
+    restore_fd(saved_stdin, STDIN_FILENO);
+  }
+}
+
+static void run_builtin_in_child_and_exit(char **args, int arg_count,
+                                          int input_fd, int output_fd) {
+  if (input_fd >= 0) {
+    dup2(input_fd, STDIN_FILENO);
+  }
+  if (output_fd >= 0) {
+    dup2(output_fd, STDOUT_FILENO);
+  }
+
+  int ignored_exit = 0;
+  run_builtin_command(args, arg_count, &ignored_exit);
+  _exit(0);
+}
+
 static int execute_two_command_pipeline(char **args, int arg_count,
                                         int pipe_index) {
   if (pipe_index <= 0 || pipe_index >= arg_count - 1) {
@@ -1114,74 +1199,115 @@ static int execute_two_command_pipeline(char **args, int arg_count,
   args[pipe_index] = NULL;
   char **left_args = args;
   char **right_args = &args[pipe_index + 1];
+  int left_arg_count = count_command_args(left_args);
+  int right_arg_count = count_command_args(right_args);
+
+  int left_is_builtin = is_builtin(left_args[0]);
+  int right_is_builtin = is_builtin(right_args[0]);
 
   int pipefd[2];
   if (pipe(pipefd) != 0) {
     return 0;
   }
 
-  pid_t left_pid = fork();
-  if (left_pid == 0) {
-    dup2(pipefd[1], STDOUT_FILENO);
+  if (!left_is_builtin && !right_is_builtin) {
+    pid_t left_pid = fork();
+    if (left_pid == 0) {
+      dup2(pipefd[1], STDOUT_FILENO);
+      close(pipefd[0]);
+      close(pipefd[1]);
+      exec_external_in_child(left_args);
+    }
+
+    if (left_pid < 0) {
+      close(pipefd[0]);
+      close(pipefd[1]);
+      return 0;
+    }
+
+    pid_t right_pid = fork();
+    if (right_pid == 0) {
+      dup2(pipefd[0], STDIN_FILENO);
+      close(pipefd[1]);
+      close(pipefd[0]);
+      exec_external_in_child(right_args);
+    }
+
     close(pipefd[0]);
     close(pipefd[1]);
-    exec_external_in_child(left_args);
-  }
 
-  if (left_pid < 0) {
-    close(pipefd[0]);
-    close(pipefd[1]);
-    return 0;
-  }
+    if (right_pid < 0) {
+      waitpid(left_pid, NULL, 0);
+      return 0;
+    }
 
-  pid_t right_pid = fork();
-  if (right_pid == 0) {
-    dup2(pipefd[0], STDIN_FILENO);
-    close(pipefd[1]);
-    close(pipefd[0]);
-    exec_external_in_child(right_args);
-  }
-
-  close(pipefd[0]);
-  close(pipefd[1]);
-
-  if (right_pid < 0) {
     waitpid(left_pid, NULL, 0);
-    return 0;
+    waitpid(right_pid, NULL, 0);
+    return 1;
   }
 
-  waitpid(left_pid, NULL, 0);
-  waitpid(right_pid, NULL, 0);
+  if (left_is_builtin && !right_is_builtin) {
+    pid_t right_pid = fork();
+    if (right_pid == 0) {
+      dup2(pipefd[0], STDIN_FILENO);
+      close(pipefd[1]);
+      close(pipefd[0]);
+      exec_external_in_child(right_args);
+    }
+
+    close(pipefd[0]);
+    run_builtin_with_redirected_stdio(left_args, left_arg_count, -1, pipefd[1]);
+    close(pipefd[1]);
+
+    if (right_pid > 0) {
+      waitpid(right_pid, NULL, 0);
+    }
+    return 1;
+  }
+
+  if (!left_is_builtin && right_is_builtin) {
+    pid_t left_pid = fork();
+    if (left_pid == 0) {
+      dup2(pipefd[1], STDOUT_FILENO);
+      close(pipefd[0]);
+      close(pipefd[1]);
+      exec_external_in_child(left_args);
+    }
+
+    close(pipefd[1]);
+    run_builtin_with_redirected_stdio(right_args, right_arg_count, pipefd[0],
+                                      -1);
+    close(pipefd[0]);
+
+    if (left_pid > 0) {
+      waitpid(left_pid, NULL, 0);
+    }
+    return 1;
+  }
+
+  pid_t left_builtin_pid = fork();
+  if (left_builtin_pid == 0) {
+    close(pipefd[0]);
+    run_builtin_in_child_and_exit(left_args, left_arg_count, -1, pipefd[1]);
+  }
+
+  close(pipefd[1]);
+  run_builtin_with_redirected_stdio(right_args, right_arg_count, pipefd[0], -1);
+  close(pipefd[0]);
+
+  if (left_builtin_pid > 0) {
+    waitpid(left_builtin_pid, NULL, 0);
+  }
+
   return 1;
 }
 
 // Dispatch one parsed command to builtin/external handlers.
 // Return 1 if shell should exit, otherwise 0.
 static int execute_command(char **args, int arg_count) {
-  char *cmd = args[0];
-
-  if (strcmp(cmd, "exit") == 0) {
-    return 1;
-  }
-
-  if (strcmp(cmd, "echo") == 0) {
-    handle_echo(args, arg_count);
-    return 0;
-  }
-
-  if (strcmp(cmd, "pwd") == 0) {
-    handle_pwd();
-    return 0;
-  }
-
-  if (strcmp(cmd, "cd") == 0) {
-    handle_cd(arg_count > 1 ? args[1] : NULL);
-    return 0;
-  }
-
-  if (strcmp(cmd, "type") == 0) {
-    handle_type(arg_count > 1 ? args[1] : NULL);
-    return 0;
+  int should_exit = 0;
+  if (run_builtin_command(args, arg_count, &should_exit)) {
+    return should_exit;
   }
 
   execute_external_command(args);
