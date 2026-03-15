@@ -16,22 +16,21 @@ int main(int argc, char *argv[]) {
     // 去除多余的换行符
     command[strcspn(command, "\r\n")] = 0;
 
-    if(strcmp(command, "exit") == 0) {
+    char *cmd = strtok(command, " \r\n");
+    char *arg = strtok(NULL, "");
+
+    if(strcmp(cmd, "exit") == 0) {
       break;
-    } else if(strncmp(command, "echo ", 5) == 0) {
-      printf("%s\r\n", command + 5);
-    } else if(strncmp(command, "type ", 5) == 0) {
-      if(strcmp(command + 5, "exit") == 0) {
-        printf("exit is a shell builtin\r\n");
-      } else if(strcmp(command + 5, "echo") == 0) {
-        printf("echo is a shell builtin\r\n");
-      } else if(strcmp(command + 5, "type") == 0) {
-        printf("type is a shell builtin\r\n");
+    } else if(strcmp(cmd, "echo") == 0) {
+      printf("%s\r\n", arg);
+    } else if(strcmp(cmd, "type") == 0) {
+      if(!strcmp(arg, "exit") || !strcmp(arg, "echo") || !strcmp(arg, "type")) {
+        printf("%s is a shell builtin\r\n", arg);
       } else {
-        printf("%s: not found\r\n", command + 5);
+        printf("%s: not found\r\n", arg);
       }
     } else {
-      printf("%s: command not found\r\n", command);
+      printf("%s: command not found\r\n", cmd);
     }
   }
   
