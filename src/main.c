@@ -12,6 +12,8 @@
 #define MAX_COMMAND_LENGTH 256
 #define MAX_ARGS 128
 
+static const char *k_builtin_completion_candidates[] = {"echo", "exit"};
+
 // Treat only space and tab as argument separators in this stage.
 static int is_inline_whitespace(char c) { return c == ' ' || c == '\t'; }
 
@@ -44,45 +46,84 @@ typedef struct {
   struct termios original;
 } TerminalMode;
 
+typedef struct {
+  int pending_list;
+  char prefix[MAX_COMMAND_LENGTH];
+} TabCompletionState;
+
 static void restore_fd(int saved_fd, int target_fd);
 
-static void consider_completion_candidate(const char *name, const char *prefix,
-                                          size_t prefix_len, char *matched,
-                                          size_t matched_size,
-                                          int *match_count) {
-  if (!starts_with(name, prefix, prefix_len)) {
-    return;
-  }
-
-  if (*match_count == 0) {
-    snprintf(matched, matched_size, "%s", name);
-    *match_count = 1;
-    return;
-  }
-
-  if (strcmp(matched, name) == 0) {
-    return;
-  }
-
-  *match_count = 2;
+static int compare_strings(const void *a, const void *b) {
+  const char *const *sa = (const char *const *)a;
+  const char *const *sb = (const char *const *)b;
+  return strcmp(*sa, *sb);
 }
 
-static void gather_external_completion_candidates(const char *prefix,
-                                                  size_t prefix_len,
-                                                  char *matched,
-                                                  size_t matched_size,
-                                                  int *match_count) {
+static void reset_tab_completion_state(TabCompletionState *state) {
+  state->pending_list = 0;
+  state->prefix[0] = '\0';
+}
+
+static char *duplicate_path_env(void) {
   const char *path_env = getenv("PATH");
   if (path_env == NULL || *path_env == '\0') {
-    return;
+    return NULL;
   }
 
   size_t path_len = strlen(path_env);
   char *path_copy = malloc(path_len + 1);
   if (path_copy == NULL) {
-    return;
+    return NULL;
   }
   memcpy(path_copy, path_env, path_len + 1);
+  return path_copy;
+}
+
+static int append_unique_match(char ***items, size_t *count, size_t *capacity,
+                               const char *name) {
+  for (size_t i = 0; i < *count; i++) {
+    if (strcmp((*items)[i], name) == 0) {
+      return 0;
+    }
+  }
+
+  if (*count == *capacity) {
+    size_t new_capacity = (*capacity == 0) ? 16 : (*capacity * 2);
+    char **new_items = realloc(*items, new_capacity * sizeof(char *));
+    if (new_items == NULL) {
+      return -1;
+    }
+    *items = new_items;
+    *capacity = new_capacity;
+  }
+
+  size_t len = strlen(name);
+  char *copy = malloc(len + 1);
+  if (copy == NULL) {
+    return -1;
+  }
+  memcpy(copy, name, len + 1);
+
+  (*items)[(*count)++] = copy;
+  return 0;
+}
+
+static void free_matches(char **items, size_t count) {
+  for (size_t i = 0; i < count; i++) {
+    free(items[i]);
+  }
+  free(items);
+}
+
+static int collect_external_completion_matches(const char *prefix,
+                                               size_t prefix_len,
+                                               char ***matches,
+                                               size_t *match_count,
+                                               size_t *capacity) {
+  char *path_copy = duplicate_path_env();
+  if (path_copy == NULL) {
+    return 0;
+  }
 
   for (char *dir = strtok(path_copy, ":"); dir != NULL;
        dir = strtok(NULL, ":")) {
@@ -110,14 +151,54 @@ static void gather_external_completion_candidates(const char *prefix,
         continue;
       }
 
-      consider_completion_candidate(name, prefix, prefix_len, matched,
-                                    matched_size, match_count);
+      if (append_unique_match(matches, match_count, capacity, name) != 0) {
+        closedir(dp);
+        free(path_copy);
+        return -1;
+      }
     }
 
     closedir(dp);
   }
 
   free(path_copy);
+  return 0;
+}
+
+static int collect_completion_matches(const char *prefix, size_t prefix_len,
+                                      char ***matches, size_t *match_count) {
+  *matches = NULL;
+  *match_count = 0;
+  size_t capacity = 0;
+
+  for (size_t i = 0; i < sizeof(k_builtin_completion_candidates) /
+                             sizeof(k_builtin_completion_candidates[0]);
+       i++) {
+    const char *name = k_builtin_completion_candidates[i];
+    if (!starts_with(name, prefix, prefix_len)) {
+      continue;
+    }
+    if (append_unique_match(matches, match_count, &capacity, name) != 0) {
+      free_matches(*matches, *match_count);
+      *matches = NULL;
+      *match_count = 0;
+      return -1;
+    }
+  }
+
+  if (collect_external_completion_matches(prefix, prefix_len, matches,
+                                          match_count, &capacity) != 0) {
+    free_matches(*matches, *match_count);
+    *matches = NULL;
+    *match_count = 0;
+    return -1;
+  }
+
+  if (*match_count > 1) {
+    qsort(*matches, *match_count, sizeof(char *), compare_strings);
+  }
+
+  return 0;
 }
 
 static int enable_interactive_input_mode(TerminalMode *mode) {
@@ -154,8 +235,8 @@ static void restore_interactive_input_mode(TerminalMode *mode) {
 
 // Try to autocomplete the first command word when TAB is pressed.
 // Only "echo" and "exit" are considered in this stage.
-static void autocomplete_builtin_live(char *line, size_t *len,
-                                      size_t line_size) {
+static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
+                                      TabCompletionState *state) {
   size_t word_start = 0;
   while (word_start < *len && line[word_start] == ' ') {
     word_start++;
@@ -168,35 +249,63 @@ static void autocomplete_builtin_live(char *line, size_t *len,
 
   // Only complete when cursor is still on the first word.
   if (word_end != *len || word_start == word_end) {
+    reset_tab_completion_state(state);
     return;
   }
 
-  static const char *candidates[] = {"echo", "exit"};
   size_t partial_len = word_end - word_start;
-  char matched[MAX_COMMAND_LENGTH];
-  matched[0] = '\0';
-  int match_count = 0;
-
-  for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
-    consider_completion_candidate(candidates[i], line + word_start, partial_len,
-                                  matched, sizeof(matched), &match_count);
+  if (partial_len + 1 > sizeof(state->prefix)) {
+    reset_tab_completion_state(state);
+    return;
   }
 
-  gather_external_completion_candidates(line + word_start, partial_len, matched,
-                                        sizeof(matched), &match_count);
+  char current_prefix[MAX_COMMAND_LENGTH];
+  memcpy(current_prefix, line + word_start, partial_len);
+  current_prefix[partial_len] = '\0';
 
-  if (match_count == 0) {
+  char **matches = NULL;
+  size_t match_count = 0;
+  if (collect_completion_matches(current_prefix, partial_len, &matches,
+                                 &match_count) != 0) {
+    reset_tab_completion_state(state);
     putchar('\a');
     return;
   }
 
-  if (match_count != 1) {
+  if (match_count == 0) {
+    free_matches(matches, match_count);
+    reset_tab_completion_state(state);
+    putchar('\a');
     return;
   }
 
+  if (match_count > 1) {
+    if (state->pending_list && strcmp(state->prefix, current_prefix) == 0) {
+      putchar('\n');
+      for (size_t i = 0; i < match_count; i++) {
+        if (i > 0) {
+          printf("  ");
+        }
+        printf("%s", matches[i]);
+      }
+      printf("\n$ %s", line);
+      reset_tab_completion_state(state);
+    } else {
+      memcpy(state->prefix, current_prefix, partial_len + 1);
+      state->pending_list = 1;
+      putchar('\a');
+    }
+
+    free_matches(matches, match_count);
+    return;
+  }
+
+  const char *matched = matches[0];
   size_t matched_len = strlen(matched);
   size_t add_len = (matched_len - partial_len) + 1; // + trailing space
   if (*len + add_len >= line_size) {
+    free_matches(matches, match_count);
+    reset_tab_completion_state(state);
     return;
   }
 
@@ -208,12 +317,16 @@ static void autocomplete_builtin_live(char *line, size_t *len,
   line[(*len)++] = ' ';
   putchar(' ');
   line[*len] = '\0';
+  free_matches(matches, match_count);
+  reset_tab_completion_state(state);
 }
 
 // Read one command line from stdin in a key-by-key fashion so TAB completion
 // can happen immediately after the key press.
 static int read_command_line(char *line, size_t line_size) {
   size_t len = 0;
+  TabCompletionState tab_state;
+  reset_tab_completion_state(&tab_state);
   line[0] = '\0';
 
   while (1) {
@@ -230,7 +343,7 @@ static int read_command_line(char *line, size_t line_size) {
     }
 
     if (ch == '\t') {
-      autocomplete_builtin_live(line, &len, line_size);
+      autocomplete_command_live(line, &len, line_size, &tab_state);
       continue;
     }
 
@@ -241,6 +354,7 @@ static int read_command_line(char *line, size_t line_size) {
         line[len] = '\0';
         printf("\b \b");
       }
+      reset_tab_completion_state(&tab_state);
       continue;
     }
 
@@ -251,6 +365,7 @@ static int read_command_line(char *line, size_t line_size) {
     line[len++] = ch;
     line[len] = '\0';
     putchar(ch);
+    reset_tab_completion_state(&tab_state);
   }
 }
 
@@ -268,17 +383,10 @@ static int find_executable_in_path(const char *name, char *out_path,
     return 0;
   }
 
-  char *path_env = getenv("PATH");
-  if (path_env == NULL || *path_env == '\0') {
-    return 0;
-  }
-
-  size_t path_len = strlen(path_env);
-  char *path_copy = malloc(path_len + 1);
+  char *path_copy = duplicate_path_env();
   if (path_copy == NULL) {
     return 0;
   }
-  memcpy(path_copy, path_env, path_len + 1);
 
   for (char *dir = strtok(path_copy, ":"); dir != NULL;
        dir = strtok(NULL, ":")) {
