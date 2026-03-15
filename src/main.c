@@ -48,8 +48,14 @@ typedef struct {
 
 typedef struct {
   int pending_list;
+  int pending_first_token;
   char prefix[MAX_COMMAND_LENGTH];
 } TabCompletionState;
+
+typedef struct {
+  char *text;
+  int is_directory;
+} FileCompletionEntry;
 
 static void restore_fd(int saved_fd, int target_fd);
 
@@ -59,8 +65,15 @@ static int compare_strings(const void *a, const void *b) {
   return strcmp(*sa, *sb);
 }
 
+static int compare_file_completion_entries(const void *a, const void *b) {
+  const FileCompletionEntry *ea = (const FileCompletionEntry *)a;
+  const FileCompletionEntry *eb = (const FileCompletionEntry *)b;
+  return strcmp(ea->text, eb->text);
+}
+
 static void reset_tab_completion_state(TabCompletionState *state) {
   state->pending_list = 0;
+  state->pending_first_token = 0;
   state->prefix[0] = '\0';
 }
 
@@ -113,6 +126,14 @@ static void free_matches(char **items, size_t count) {
     free(items[i]);
   }
   free(items);
+}
+
+static void free_file_completion_entries(FileCompletionEntry *entries,
+                                         size_t count) {
+  for (size_t i = 0; i < count; i++) {
+    free(entries[i].text);
+  }
+  free(entries);
 }
 
 static size_t common_prefix_length(const char *a, const char *b) {
@@ -224,14 +245,18 @@ static int collect_completion_matches(const char *prefix, size_t prefix_len,
   return 0;
 }
 
-static int collect_single_filename_match(const char *prefix, size_t prefix_len,
-                                         char *matched, size_t matched_size,
-                                         int *matched_is_directory,
-                                         int *out_match_count) {
+static int collect_file_completion_entries(const char *prefix,
+                                           size_t prefix_len,
+                                           FileCompletionEntry **entries,
+                                           size_t *entry_count) {
   char directory[MAX_COMMAND_LENGTH];
   char output_prefix[MAX_COMMAND_LENGTH];
   const char *name_prefix = prefix;
   size_t name_prefix_len = prefix_len;
+
+  *entries = NULL;
+  *entry_count = 0;
+  size_t capacity = 0;
 
   directory[0] = '.';
   directory[1] = '\0';
@@ -258,8 +283,6 @@ static int collect_single_filename_match(const char *prefix, size_t prefix_len,
     return 0;
   }
 
-  int match_count = 0;
-  int single_is_directory = 0;
   struct dirent *entry;
   while ((entry = readdir(dp)) != NULL) {
     const char *name = entry->d_name;
@@ -276,27 +299,46 @@ static int collect_single_filename_match(const char *prefix, size_t prefix_len,
       continue;
     }
 
-    if (match_count == 0) {
-      snprintf(matched, matched_size, "%s", candidate);
-      struct stat st;
-      single_is_directory =
-          (stat(candidate, &st) == 0 && S_ISDIR(st.st_mode)) ? 1 : 0;
-      match_count = 1;
-      continue;
+    if (*entry_count == capacity) {
+      size_t new_capacity = (capacity == 0) ? 8 : (capacity * 2);
+      FileCompletionEntry *new_entries =
+          realloc(*entries, new_capacity * sizeof(FileCompletionEntry));
+      if (new_entries == NULL) {
+        closedir(dp);
+        free_file_completion_entries(*entries, *entry_count);
+        *entries = NULL;
+        *entry_count = 0;
+        return -1;
+      }
+      *entries = new_entries;
+      capacity = new_capacity;
     }
 
-    if (strcmp(matched, candidate) != 0) {
-      match_count = 2;
-      break;
+    size_t len = strlen(candidate);
+    char *copy = malloc(len + 1);
+    if (copy == NULL) {
+      closedir(dp);
+      free_file_completion_entries(*entries, *entry_count);
+      *entries = NULL;
+      *entry_count = 0;
+      return -1;
     }
+
+    memcpy(copy, candidate, len + 1);
+    (*entries)[*entry_count].text = copy;
+
+    struct stat st;
+    (*entries)[*entry_count].is_directory =
+        (stat(candidate, &st) == 0 && S_ISDIR(st.st_mode)) ? 1 : 0;
+    (*entry_count)++;
   }
 
   closedir(dp);
-  if (match_count == 1) {
-    *matched_is_directory = single_is_directory;
+  if (*entry_count > 1) {
+    qsort(*entries, *entry_count, sizeof(FileCompletionEntry),
+          compare_file_completion_entries);
   }
-  *out_match_count = match_count;
-  return match_count == 1;
+  return 0;
 }
 
 static int is_first_token_position(const char *line, size_t word_start) {
@@ -369,24 +411,56 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
   // Argument position: complete from current directory when there is exactly
   // one file/path match.
   if (!first_token) {
-    char matched_filename[MAX_COMMAND_LENGTH];
-    int matched_is_directory = 0;
-    int file_match_count = 0;
-    if (!collect_single_filename_match(
-            current_prefix, partial_len, matched_filename,
-            sizeof(matched_filename), &matched_is_directory,
-            &file_match_count)) {
-      if (file_match_count == 0) {
-        putchar('\a');
-      }
+    FileCompletionEntry *entries = NULL;
+    size_t entry_count = 0;
+    if (collect_file_completion_entries(current_prefix, partial_len, &entries,
+                                        &entry_count) != 0) {
+      putchar('\a');
       reset_tab_completion_state(state);
       return;
     }
+
+    if (entry_count == 0) {
+      putchar('\a');
+      reset_tab_completion_state(state);
+      free_file_completion_entries(entries, entry_count);
+      return;
+    }
+
+    if (entry_count > 1) {
+      if (state->pending_list && !state->pending_first_token &&
+          strcmp(state->prefix, current_prefix) == 0) {
+        putchar('\n');
+        for (size_t i = 0; i < entry_count; i++) {
+          if (i > 0) {
+            printf("  ");
+          }
+          printf("%s", entries[i].text);
+          if (entries[i].is_directory) {
+            putchar('/');
+          }
+        }
+        printf("\n$ %s", line);
+        reset_tab_completion_state(state);
+      } else {
+        memcpy(state->prefix, current_prefix, partial_len + 1);
+        state->pending_list = 1;
+        state->pending_first_token = 0;
+        putchar('\a');
+      }
+
+      free_file_completion_entries(entries, entry_count);
+      return;
+    }
+
+    const char *matched_filename = entries[0].text;
+    int matched_is_directory = entries[0].is_directory;
 
     size_t matched_len = strlen(matched_filename);
     size_t add_len = (matched_len - partial_len) + 1;
     if (*len + add_len >= line_size) {
       reset_tab_completion_state(state);
+      free_file_completion_entries(entries, entry_count);
       return;
     }
 
@@ -405,6 +479,7 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
 
     line[*len] = '\0';
     reset_tab_completion_state(state);
+    free_file_completion_entries(entries, entry_count);
     return;
   }
 
@@ -453,6 +528,7 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
     } else {
       memcpy(state->prefix, current_prefix, partial_len + 1);
       state->pending_list = 1;
+      state->pending_first_token = 1;
       putchar('\a');
     }
 
