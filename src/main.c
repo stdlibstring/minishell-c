@@ -114,6 +114,14 @@ static int parse_arguments(char *line, char **args, int max_args) {
     int in_double_quote = 0;
 
     while (*read != '\0') {
+      if (!in_single_quote && !in_double_quote && *read == '\\') {
+        read++;
+        if (*read != '\0') {
+          *write++ = *read++;
+        }
+        continue;
+      }
+
       if (*read == '\'' && !in_double_quote) {
         in_single_quote = !in_single_quote;
         read++;
