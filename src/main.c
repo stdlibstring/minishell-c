@@ -882,6 +882,20 @@ static void handle_cd(const char *path) {
 }
 
 static void handle_history(char **args, int arg_count) {
+  if (arg_count == 3 && strcmp(args[1], "-w") == 0) {
+    FILE *fp = fopen(args[2], "w");
+    if (fp == NULL) {
+      return;
+    }
+
+    for (int i = 0; i < g_history_count; i++) {
+      fprintf(fp, "%s\n", g_history[i]);
+    }
+
+    fclose(fp);
+    return;
+  }
+
   if (arg_count == 3 && strcmp(args[1], "-r") == 0) {
     FILE *fp = fopen(args[2], "r");
     if (fp == NULL) {
