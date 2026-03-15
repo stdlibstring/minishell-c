@@ -27,6 +27,14 @@ static int is_escapable_in_double_quotes(char c) {
   return c == '"' || c == '\\';
 }
 
+static void print_shell_newline(FILE *stream, int fd) {
+  if (isatty(fd)) {
+    fprintf(stream, "\r\n");
+  } else {
+    fprintf(stream, "\n");
+  }
+}
+
 // Parsed redirection intent for one command line.
 typedef struct {
   char *stdout_file;
@@ -708,23 +716,27 @@ static int find_executable_in_path(const char *name, char *out_path,
 // Implementation of the "type" builtin.
 static void handle_type(const char *name) {
   if (name == NULL || *name == '\0') {
-    printf("type: missing operand\r\n");
+    printf("type: missing operand");
+    print_shell_newline(stdout, STDOUT_FILENO);
     return;
   }
 
   // 1) builtin
   if (is_builtin(name)) {
-    printf("%s is a shell builtin\r\n", name);
+    printf("%s is a shell builtin", name);
+    print_shell_newline(stdout, STDOUT_FILENO);
     return;
   }
 
   char full_path[PATH_MAX];
   if (find_executable_in_path(name, full_path, sizeof(full_path))) {
-    printf("%s is %s\r\n", name, full_path);
+    printf("%s is %s", name, full_path);
+    print_shell_newline(stdout, STDOUT_FILENO);
     return;
   }
 
-  printf("%s: not found\r\n", name);
+  printf("%s: not found", name);
+  print_shell_newline(stdout, STDOUT_FILENO);
 }
 
 // Implementation of the "cd" builtin (supports ~ via HOME).
@@ -743,7 +755,8 @@ static void handle_cd(const char *path) {
   }
 
   if (chdir(target) != 0) {
-    printf("cd: %s: No such file or directory\r\n", path);
+    printf("cd: %s: No such file or directory", path);
+    print_shell_newline(stdout, STDOUT_FILENO);
   }
 }
 
@@ -1053,14 +1066,15 @@ static void handle_echo(char **args, int arg_count) {
     }
     printf("%s", args[i]);
   }
-  printf("\r\n");
+  print_shell_newline(stdout, STDOUT_FILENO);
 }
 
 // Implementation of the "pwd" builtin.
 static void handle_pwd(void) {
   char cwd[PATH_MAX];
   if (getcwd(cwd, sizeof(cwd)) != NULL) {
-    printf("%s\r\n", cwd);
+    printf("%s", cwd);
+    print_shell_newline(stdout, STDOUT_FILENO);
   } else {
     perror("pwd");
   }
@@ -1070,7 +1084,8 @@ static void handle_pwd(void) {
 static void execute_external_command(char **args) {
   char full_path[PATH_MAX];
   if (!find_executable_in_path(args[0], full_path, sizeof(full_path))) {
-    printf("%s: command not found\r\n", args[0]);
+    printf("%s: command not found", args[0]);
+    print_shell_newline(stdout, STDOUT_FILENO);
     return;
   }
 
