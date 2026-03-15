@@ -38,6 +38,21 @@ static void print_shell_newline(FILE *stream, int fd) {
   }
 }
 
+static void redraw_prompt_line(const char *line, size_t len,
+                               size_t previous_len) {
+  printf("\r$ %s", line);
+
+  if (previous_len > len) {
+    size_t extra = previous_len - len;
+    for (size_t i = 0; i < extra; i++) {
+      putchar(' ');
+    }
+    for (size_t i = 0; i < extra; i++) {
+      putchar('\b');
+    }
+  }
+}
+
 static void append_history_entry(const char *command) {
   if (command == NULL || *command == '\0') {
     return;
@@ -653,6 +668,10 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
 static int read_command_line(char *line, size_t line_size) {
   size_t len = 0;
   TabCompletionState tab_state;
+  int history_index = g_history_count;
+  char history_draft[MAX_COMMAND_LENGTH];
+  history_draft[0] = '\0';
+  size_t history_draft_len = 0;
   reset_tab_completion_state(&tab_state);
   line[0] = '\0';
 
@@ -674,6 +693,58 @@ static int read_command_line(char *line, size_t line_size) {
       continue;
     }
 
+    if (ch == 27) {
+      char seq1 = '\0';
+      char seq2 = '\0';
+      if (read(STDIN_FILENO, &seq1, 1) <= 0 ||
+          read(STDIN_FILENO, &seq2, 1) <= 0) {
+        continue;
+      }
+
+      if (seq1 == '[' && seq2 == 'A') {
+        if (g_history_count == 0) {
+          continue;
+        }
+
+        if (history_index == g_history_count) {
+          snprintf(history_draft, sizeof(history_draft), "%s", line);
+          history_draft_len = len;
+        }
+
+        if (history_index > 0) {
+          history_index--;
+        }
+
+        size_t previous_len = len;
+        snprintf(line, line_size, "%s", g_history[history_index]);
+        len = strlen(line);
+        redraw_prompt_line(line, len, previous_len);
+        reset_tab_completion_state(&tab_state);
+        continue;
+      }
+
+      if (seq1 == '[' && seq2 == 'B') {
+        if (history_index < g_history_count) {
+          size_t previous_len = len;
+          history_index++;
+
+          if (history_index == g_history_count) {
+            snprintf(line, line_size, "%s", history_draft);
+            len = history_draft_len;
+          } else {
+            snprintf(line, line_size, "%s", g_history[history_index]);
+            len = strlen(line);
+          }
+
+          redraw_prompt_line(line, len, previous_len);
+          reset_tab_completion_state(&tab_state);
+        }
+        continue;
+      }
+
+      continue;
+    }
+
     // Basic backspace support for interactive editing.
     if (ch == 127 || ch == '\b') {
       if (len > 0) {
@@ -692,6 +763,9 @@ static int read_command_line(char *line, size_t line_size) {
     line[len++] = ch;
     line[len] = '\0';
     putchar(ch);
+    history_index = g_history_count;
+    snprintf(history_draft, sizeof(history_draft), "%s", line);
+    history_draft_len = len;
     reset_tab_completion_state(&tab_state);
   }
 }
