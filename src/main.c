@@ -780,8 +780,20 @@ static void handle_cd(const char *path) {
   }
 }
 
-static void handle_history(void) {
-  for (int i = 0; i < g_history_count; i++) {
+static void handle_history(char **args, int arg_count) {
+  int start = 0;
+
+  if (arg_count > 1) {
+    char *end = NULL;
+    long n = strtol(args[1], &end, 10);
+    if (end != args[1] && *end == '\0' && n > 0) {
+      if (n < g_history_count) {
+        start = g_history_count - (int)n;
+      }
+    }
+  }
+
+  for (int i = start; i < g_history_count; i++) {
     printf("%5d  %s", i + 1, g_history[i]);
     print_shell_newline(stdout, STDOUT_FILENO);
   }
@@ -1152,7 +1164,7 @@ static int run_builtin_command(char **args, int arg_count, int *should_exit) {
   }
 
   if (strcmp(cmd, "history") == 0) {
-    handle_history();
+    handle_history(args, arg_count);
     return 1;
   }
 
