@@ -23,10 +23,12 @@ static int find_executable_in_path(const char *name, char *out_path,
     return 0;
   }
 
-  char *path_copy = strdup(path_env);
+  size_t path_len = strlen(path_env);
+  char *path_copy = malloc(path_len + 1);
   if (path_copy == NULL) {
     return 0;
   }
+  memcpy(path_copy, path_env, path_len + 1);
 
   for (char *dir = strtok(path_copy, ":"); dir != NULL;
        dir = strtok(NULL, ":")) {
@@ -107,15 +109,12 @@ static int parse_arguments(char *line, char **args, int max_args) {
     args[arg_count++] = write;
     int in_single_quote = 0;
 
-    while (*read != '\0') {
+    while (*read != '\0' &&
+           (in_single_quote || (*read != ' ' && *read != '\t'))) {
       if (*read == '\'') {
         in_single_quote = !in_single_quote;
         read++;
         continue;
-      }
-
-      if (!in_single_quote && (*read == ' ' || *read == '\t')) {
-        break;
       }
 
       *write++ = *read++;
