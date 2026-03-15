@@ -1,3 +1,4 @@
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +9,12 @@
 
 #define MAX_COMMAND_LENGTH 256
 #define MAX_ARGS 128
+
+static int is_inline_whitespace(char c) { return c == ' ' || c == '\t'; }
+
+static int is_escapable_in_double_quotes(char c) {
+  return c == '"' || c == '\\';
+}
 
 static int is_builtin(const char *cmd) {
   return strcmp(cmd, "echo") == 0 || strcmp(cmd, "type") == 0 ||
@@ -97,7 +104,7 @@ static int parse_arguments(char *line, char **args, int max_args) {
   int arg_count = 0;
 
   while (*read != '\0') {
-    while (*read == ' ' || *read == '\t') {
+    while (is_inline_whitespace(*read)) {
       read++;
     }
 
@@ -113,10 +120,13 @@ static int parse_arguments(char *line, char **args, int max_args) {
     int in_single_quote = 0;
     int in_double_quote = 0;
 
+    // Parse one shell word. Quote characters are removed and adjacent quoted
+    // segments are concatenated into the same argument.
     while (*read != '\0') {
       if (in_double_quote && *read == '\\') {
         char next = *(read + 1);
-        if (next == '"' || next == '\\') {
+        // In double quotes, only \" and \\ are special at this stage.
+        if (is_escapable_in_double_quotes(next)) {
           read++;
           *write++ = *read++;
           continue;
@@ -124,6 +134,7 @@ static int parse_arguments(char *line, char **args, int max_args) {
       }
 
       if (!in_single_quote && !in_double_quote && *read == '\\') {
+        // Outside quotes, backslash escapes the next character literally.
         read++;
         if (*read != '\0') {
           *write++ = *read++;
@@ -143,9 +154,8 @@ static int parse_arguments(char *line, char **args, int max_args) {
         continue;
       }
 
-      if (!in_single_quote && !in_double_quote &&
-          (*read == ' ' || *read == '\t')) {
-        while (*read == ' ' || *read == '\t') {
+      if (!in_single_quote && !in_double_quote && is_inline_whitespace(*read)) {
+        while (is_inline_whitespace(*read)) {
           read++;
         }
         break;
@@ -159,6 +169,72 @@ static int parse_arguments(char *line, char **args, int max_args) {
 
   args[arg_count] = NULL;
   return arg_count;
+}
+
+static int split_command_and_stdout_redirection(char **args, int arg_count,
+                                                char **command_args,
+                                                int max_args,
+                                                char **stdout_file) {
+  int command_arg_count = 0;
+  *stdout_file = NULL;
+
+  for (int i = 0; i < arg_count; i++) {
+    char *token = args[i];
+
+    if (strcmp(token, ">") == 0 || strcmp(token, "1>") == 0) {
+      if (i + 1 >= arg_count) {
+        return -1;
+      }
+      *stdout_file = args[++i];
+      continue;
+    }
+
+    if (strncmp(token, "1>", 2) == 0 && token[2] != '\0') {
+      *stdout_file = token + 2;
+      continue;
+    }
+
+    if (token[0] == '>' && token[1] != '\0') {
+      *stdout_file = token + 1;
+      continue;
+    }
+
+    if (command_arg_count >= max_args - 1) {
+      break;
+    }
+    command_args[command_arg_count++] = token;
+  }
+
+  command_args[command_arg_count] = NULL;
+  return command_arg_count;
+}
+
+static int redirect_stdout_to_file(const char *path) {
+  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (fd < 0) {
+    return -1;
+  }
+
+  int saved_stdout = dup(STDOUT_FILENO);
+  if (saved_stdout < 0) {
+    close(fd);
+    return -1;
+  }
+
+  if (dup2(fd, STDOUT_FILENO) < 0) {
+    close(fd);
+    close(saved_stdout);
+    return -1;
+  }
+
+  close(fd);
+  return saved_stdout;
+}
+
+static void restore_stdout(int saved_stdout) {
+  fflush(stdout);
+  dup2(saved_stdout, STDOUT_FILENO);
+  close(saved_stdout);
 }
 
 static void handle_echo(char **args, int arg_count) {
@@ -247,12 +323,34 @@ int main(int argc, char *argv[]) {
     command[strcspn(command, "\r\n")] = 0;
     char *args[MAX_ARGS];
     int arg_count = parse_arguments(command, args, MAX_ARGS);
+    char *command_args[MAX_ARGS];
+    char *stdout_file = NULL;
 
     if (arg_count == 0) {
       continue; // 如果没有输入命令，继续下一轮循环
     }
 
-    if (execute_command(args, arg_count)) {
+    int command_arg_count = split_command_and_stdout_redirection(
+        args, arg_count, command_args, MAX_ARGS, &stdout_file);
+    if (command_arg_count <= 0) {
+      continue;
+    }
+
+    int saved_stdout = -1;
+    if (stdout_file != NULL) {
+      saved_stdout = redirect_stdout_to_file(stdout_file);
+      if (saved_stdout < 0) {
+        continue;
+      }
+    }
+
+    int should_exit = execute_command(command_args, command_arg_count);
+
+    if (saved_stdout >= 0) {
+      restore_stdout(saved_stdout);
+    }
+
+    if (should_exit) {
       break;
     }
   }
