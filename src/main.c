@@ -11,8 +11,11 @@
 
 #define MAX_COMMAND_LENGTH 256
 #define MAX_ARGS 128
+#define MAX_HISTORY 1024
 
 static const char *k_builtin_completion_candidates[] = {"echo", "exit"};
+static char g_history[MAX_HISTORY][MAX_COMMAND_LENGTH];
+static int g_history_count = 0;
 
 // Treat only space and tab as argument separators in this stage.
 static int is_inline_whitespace(char c) { return c == ' ' || c == '\t'; }
@@ -33,6 +36,23 @@ static void print_shell_newline(FILE *stream, int fd) {
   } else {
     fprintf(stream, "\n");
   }
+}
+
+static void append_history_entry(const char *command) {
+  if (command == NULL || *command == '\0') {
+    return;
+  }
+
+  if (g_history_count < MAX_HISTORY) {
+    snprintf(g_history[g_history_count], MAX_COMMAND_LENGTH, "%s", command);
+    g_history_count++;
+    return;
+  }
+
+  for (int i = 1; i < MAX_HISTORY; i++) {
+    snprintf(g_history[i - 1], MAX_COMMAND_LENGTH, "%s", g_history[i]);
+  }
+  snprintf(g_history[MAX_HISTORY - 1], MAX_COMMAND_LENGTH, "%s", command);
 }
 
 // Parsed redirection intent for one command line.
@@ -679,8 +699,8 @@ static int read_command_line(char *line, size_t line_size) {
 // Builtins currently supported by this shell.
 static int is_builtin(const char *cmd) {
   return strcmp(cmd, "echo") == 0 || strcmp(cmd, "type") == 0 ||
-         strcmp(cmd, "exit") == 0 || strcmp(cmd, "pwd") == 0 ||
-         strcmp(cmd, "cd") == 0;
+         strcmp(cmd, "exit") == 0 || strcmp(cmd, "history") == 0 ||
+         strcmp(cmd, "pwd") == 0 || strcmp(cmd, "cd") == 0;
 }
 
 // Search PATH for an executable file and return its absolute path.
@@ -756,6 +776,13 @@ static void handle_cd(const char *path) {
 
   if (chdir(target) != 0) {
     printf("cd: %s: No such file or directory", path);
+    print_shell_newline(stdout, STDOUT_FILENO);
+  }
+}
+
+static void handle_history(void) {
+  for (int i = 0; i < g_history_count; i++) {
+    printf("%5d  %s", i + 1, g_history[i]);
     print_shell_newline(stdout, STDOUT_FILENO);
   }
 }
@@ -1124,6 +1151,11 @@ static int run_builtin_command(char **args, int arg_count, int *should_exit) {
     return 1;
   }
 
+  if (strcmp(cmd, "history") == 0) {
+    handle_history();
+    return 1;
+  }
+
   if (strcmp(cmd, "cd") == 0) {
     handle_cd(arg_count > 1 ? args[1] : NULL);
     return 1;
@@ -1313,9 +1345,16 @@ int main(int argc, char *argv[]) {
       break;
     }
 
+    char raw_command[MAX_COMMAND_LENGTH];
+    snprintf(raw_command, sizeof(raw_command), "%s", command);
+
     // 1) Tokenize command line into raw shell arguments.
     char *args[MAX_ARGS];
     int arg_count = parse_arguments(command, args, MAX_ARGS);
+
+    if (arg_count > 0) {
+      append_history_entry(raw_command);
+    }
 
     int pipe_index = find_pipe_token_index(args, arg_count);
     if (pipe_index >= 0) {
