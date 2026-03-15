@@ -299,23 +299,19 @@ static void restore_interactive_input_mode(TerminalMode *mode) {
 // Try to autocomplete the current token when TAB is pressed.
 static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
                                       TabCompletionState *state) {
-  size_t word_start = 0;
-  while (word_start < *len && line[word_start] == ' ') {
-    word_start++;
+  // Complete the token currently being typed (the substring after the last
+  // whitespace before the cursor).
+  size_t word_start = *len;
+  while (word_start > 0 && !is_inline_whitespace(line[word_start - 1])) {
+    word_start--;
   }
 
-  size_t word_end = word_start;
-  while (word_end < *len && line[word_end] != ' ' && line[word_end] != '\t') {
-    word_end++;
-  }
-
-  // Only complete when cursor is still on the first word.
-  if (word_end != *len || word_start == word_end) {
+  if (word_start == *len) {
     reset_tab_completion_state(state);
     return;
   }
 
-  size_t partial_len = word_end - word_start;
+  size_t partial_len = *len - word_start;
   if (partial_len + 1 > sizeof(state->prefix)) {
     reset_tab_completion_state(state);
     return;
