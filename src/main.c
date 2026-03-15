@@ -8,7 +8,8 @@
 
 static int is_builtin(const char *cmd) {
   return strcmp(cmd, "echo") == 0 || strcmp(cmd, "type") == 0 ||
-         strcmp(cmd, "exit") == 0 || strcmp(cmd, "pwd") == 0;
+         strcmp(cmd, "exit") == 0 || strcmp(cmd, "pwd") == 0 ||
+         strcmp(cmd, "cd") == 0;
 }
 
 static int find_executable_in_path(const char *name, char *out_path,
@@ -65,6 +66,17 @@ static void handle_type(const char *name) {
 
   printf("%s: not found\r\n", name);
 }
+
+static void handle_cd(const char *path) {
+  if (path == NULL || *path == '\0') {
+    return;
+  }
+
+  if (chdir(path) != 0) {
+    printf("cd: %s: No such file or directory\r\n", path);
+  }
+}
+
 int main(int argc, char *argv[]) {
   // Flush after every printf
   setbuf(stdout, NULL);
@@ -111,6 +123,8 @@ int main(int argc, char *argv[]) {
       } else {
         perror("pwd");
       }
+    } else if (strcmp(cmd, "cd") == 0) {
+      handle_cd(arg_count > 1 ? args[1] : NULL);
     } else if (strcmp(cmd, "type") == 0) {
       handle_type(arg_count > 1 ? args[1] : NULL);
     } else {
