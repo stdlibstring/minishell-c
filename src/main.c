@@ -9,14 +9,54 @@
 #include <termios.h>
 #include <unistd.h>
 
-/*
- * Single-file shell for the CodeCrafters Shell challenge.
+/**
+ * @file main.c
+ * @brief Single-file shell implementation for the CodeCrafters Shell challenge.
  *
- * Main modules implemented in this file:
+ * @details
+ * Major subsystems in this file:
  * - Interactive input: raw mode, backspace, arrows, TAB completion
  * - Parsing: quoting/escaping, argument splitting, redirection parsing
  * - Execution: builtins, PATH lookup, external process launch, pipelines
  * - History: in-memory ring buffer + file load/save/append semantics
+ *
+ * @section function_index Function-Level Index
+ * Input/terminal:
+ * - is_space_or_tab, print_newline_for_shell_io, redraw_prompt_line,
+ *   read_ansi_escape_suffix, apply_history_selection, history_navigate_up,
+ *   history_navigate_down, enable_interactive_input_mode,
+ *   restore_interactive_input_mode, read_command_line
+ *
+ * Completion:
+ * - has_prefix, compare_strings, compare_file_completion_entries,
+ *   longest_common_prefix_length_for_entries, reset_tab_completion_state,
+ *   duplicate_path_env, append_unique_match, free_matches,
+ *   free_file_completion_entries, append_completion_span,
+ *   append_completion_char, print_command_match_list,
+ *   print_file_match_list, set_pending_completion, common_prefix_length,
+ *   longest_common_prefix_length, collect_external_completion_matches,
+ *   collect_completion_matches, collect_file_completion_entries,
+ *   is_first_token_position, autocomplete_command_live
+ *
+ * History persistence:
+ * - history_append_entry, trim_crlf_tail, history_write_range_to_file,
+ *   history_load_from_file, handle_history,
+ *   history_load_from_histfile_env, history_write_to_histfile_env
+ *
+ * Parsing and redirection:
+ * - is_escapable_in_double_quotes, parse_arguments, assign_redirection,
+ *   parse_inline_redirection_token, parse_separate_redirection_token,
+ *   split_command_and_redirections, redirect_fd_to_file,
+ *   apply_redirections, restore_redirections, restore_fd
+ *
+ * Builtins and external execution:
+ * - is_builtin, find_executable_on_path, handle_type, handle_cd,
+ *   handle_echo, handle_pwd, execute_external_via_path,
+ *   run_builtin_command, exec_external_in_child
+ *
+ * Pipelines and dispatch:
+ * - find_pipe_separator_index, count_argv_entries, split_pipeline_argv,
+ *   execute_pipeline_commands, execute_single_command
  */
 
 #define MAX_COMMAND_LENGTH 256
@@ -27,29 +67,29 @@ static const char *k_builtin_completion_candidates[] = {"echo", "exit"};
 static char g_history[MAX_HISTORY][MAX_COMMAND_LENGTH];
 static int g_history_count = 0;
 
-/*
- * Count of entries that were added in memory but not yet persisted.
+/**
+ * @brief Number of newest entries that exist only in memory.
  *
- * Used by history -a to append only the delta since last successful save.
- * This counter is intentionally capped at MAX_HISTORY to stay compatible with
- * fixed-size history storage and rollover behavior.
+ * Used by `history -a` to append only commands added since the last successful
+ * persistence operation. Capped at MAX_HISTORY to stay consistent with the
+ * fixed-size history buffer rollover behavior.
  */
 static int g_history_unsaved_count = 0;
 
-// Treat only space and tab as argument separators in this stage.
-static int is_inline_whitespace(char c) { return c == ' ' || c == '\t'; }
+/** @brief Treat only space and tab as inline separators. */
+static int is_space_or_tab(char c) { return c == ' ' || c == '\t'; }
 
-static int starts_with(const char *text, const char *prefix,
+static int has_prefix(const char *text, const char *prefix,
                        size_t prefix_len) {
   return strncmp(text, prefix, prefix_len) == 0;
 }
 
-// In double quotes, only these two escape targets are handled for now.
+/** @brief Supported escape targets while parsing inside double quotes. */
 static int is_escapable_in_double_quotes(char c) {
   return c == '"' || c == '\\';
 }
 
-static void print_shell_newline(FILE *stream, int fd) {
+static void print_newline_for_shell_io(FILE *stream, int fd) {
   if (isatty(fd)) {
     fprintf(stream, "\r\n");
   } else {
@@ -72,7 +112,7 @@ static void redraw_prompt_line(const char *line, size_t len,
   }
 }
 
-static int read_escape_suffix(char *seq1, char *seq2) {
+static int read_ansi_escape_suffix(char *seq1, char *seq2) {
   if (read(STDIN_FILENO, seq1, 1) <= 0 || read(STDIN_FILENO, seq2, 1) <= 0) {
     return 0;
   }
@@ -126,7 +166,7 @@ static void history_navigate_down(char *line, size_t line_size, size_t *len,
   apply_history_selection(line, line_size, len, g_history[*history_index]);
 }
 
-static void append_history_entry(const char *command) {
+static void history_append_entry(const char *command) {
   /* Reject empty commands so history stays meaningful and compact. */
   if (command == NULL || *command == '\0') {
     return;
@@ -152,7 +192,7 @@ static void append_history_entry(const char *command) {
   }
 }
 
-static void trim_line_endings(char *line) {
+static void trim_crlf_tail(char *line) {
   /* Normalize both LF and CRLF endings when loading from files. */
   size_t len = strlen(line);
   while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
@@ -160,7 +200,7 @@ static void trim_line_endings(char *line) {
   }
 }
 
-static int write_history_range_to_file(const char *path, const char *mode,
+static int history_write_range_to_file(const char *path, const char *mode,
                                        int start, int end) {
   /* mode should be "a" (append) or "w" (overwrite). */
   FILE *fp = fopen(path, mode);
@@ -177,7 +217,7 @@ static int write_history_range_to_file(const char *path, const char *mode,
   return 1;
 }
 
-static void load_history_from_file(const char *path) {
+static void history_load_from_file(const char *path) {
   /* Missing files are treated as "no history yet" rather than an error. */
   FILE *fp = fopen(path, "r");
   if (fp == NULL) {
@@ -186,18 +226,18 @@ static void load_history_from_file(const char *path) {
 
   char line[MAX_COMMAND_LENGTH];
   while (fgets(line, sizeof(line), fp) != NULL) {
-    trim_line_endings(line);
+    trim_crlf_tail(line);
     /* Ignore blank lines so in-memory history stores commands only. */
     if (line[0] == '\0') {
       continue;
     }
-    append_history_entry(line);
+    history_append_entry(line);
   }
 
   fclose(fp);
 }
 
-// Parsed redirection intent for one command line.
+/** @brief Parsed redirection intent for a single command line. */
 typedef struct {
   char *stdout_file;
   int stdout_append;
@@ -205,7 +245,7 @@ typedef struct {
   int stderr_append;
 } RedirectionSpec;
 
-// Saved original descriptors so they can be restored after command execution.
+/** @brief Saved stdout/stderr fds used for post-command restoration. */
 typedef struct {
   int saved_stdout;
   int saved_stderr;
@@ -434,7 +474,7 @@ static int collect_external_completion_matches(const char *prefix,
     struct dirent *entry;
     while ((entry = readdir(dp)) != NULL) {
       const char *name = entry->d_name;
-      if (!starts_with(name, prefix, prefix_len)) {
+      if (!has_prefix(name, prefix, prefix_len)) {
         continue;
       }
 
@@ -474,7 +514,7 @@ static int collect_completion_matches(const char *prefix, size_t prefix_len,
                              sizeof(k_builtin_completion_candidates[0]);
        i++) {
     const char *name = k_builtin_completion_candidates[i];
-    if (!starts_with(name, prefix, prefix_len)) {
+    if (!has_prefix(name, prefix, prefix_len)) {
       continue;
     }
     if (append_unique_match(matches, match_count, &capacity, name) != 0) {
@@ -544,7 +584,7 @@ static int collect_file_completion_entries(const char *prefix,
     if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
       continue;
     }
-    if (!starts_with(name, name_prefix, name_prefix_len)) {
+    if (!has_prefix(name, name_prefix, name_prefix_len)) {
       continue;
     }
 
@@ -598,7 +638,7 @@ static int collect_file_completion_entries(const char *prefix,
 
 static int is_first_token_position(const char *line, size_t word_start) {
   for (size_t i = 0; i < word_start; i++) {
-    if (!is_inline_whitespace(line[i])) {
+    if (!is_space_or_tab(line[i])) {
       return 0;
     }
   }
@@ -637,13 +677,13 @@ static void restore_interactive_input_mode(TerminalMode *mode) {
   mode->enabled = 0;
 }
 
-// Try to autocomplete the current token when TAB is pressed.
+/** @brief Handle TAB completion for the token at the current cursor position.
+ */
 static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
                                       TabCompletionState *state) {
-  // Complete the token currently being typed (the substring after the last
-  // whitespace before the cursor).
+  /* Complete token after the last inline whitespace before cursor. */
   size_t word_start = *len;
-  while (word_start > 0 && !is_inline_whitespace(line[word_start - 1])) {
+  while (word_start > 0 && !is_space_or_tab(line[word_start - 1])) {
     word_start--;
   }
 
@@ -663,8 +703,7 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
   memcpy(current_prefix, line + word_start, partial_len);
   current_prefix[partial_len] = '\0';
 
-  // Argument position: complete from current directory when there is exactly
-  // one file/path match.
+  /* Argument position: complete against filesystem paths. */
   if (!first_token) {
     FileCompletionEntry *entries = NULL;
     size_t entry_count = 0;
@@ -790,8 +829,11 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
   reset_tab_completion_state(state);
 }
 
-// Read one command line from stdin in a key-by-key fashion so TAB completion
-// can happen immediately after the key press.
+/**
+ * @brief Read one command line in raw, key-by-key mode.
+ *
+ * @return Number of bytes read (>=0), or -1 on EOF/read failure.
+ */
 static int read_command_line(char *line, size_t line_size) {
   size_t len = 0;
   TabCompletionState tab_state;
@@ -825,7 +867,7 @@ static int read_command_line(char *line, size_t line_size) {
       /* Parse a minimal ANSI escape sequence for arrow keys. */
       char seq1 = '\0';
       char seq2 = '\0';
-      if (!read_escape_suffix(&seq1, &seq2)) {
+      if (!read_ansi_escape_suffix(&seq1, &seq2)) {
         continue;
       }
 
@@ -847,7 +889,7 @@ static int read_command_line(char *line, size_t line_size) {
       continue;
     }
 
-    // Basic backspace support for interactive editing.
+    /** Basic backspace support for interactive editing. */
     if (ch == 127 || ch == '\b') {
       if (len > 0) {
         len--;
@@ -872,15 +914,15 @@ static int read_command_line(char *line, size_t line_size) {
   }
 }
 
-// Builtins currently supported by this shell.
+/** @brief Check whether a command name is implemented as a builtin. */
 static int is_builtin(const char *cmd) {
   return strcmp(cmd, "echo") == 0 || strcmp(cmd, "type") == 0 ||
          strcmp(cmd, "exit") == 0 || strcmp(cmd, "history") == 0 ||
          strcmp(cmd, "pwd") == 0 || strcmp(cmd, "cd") == 0;
 }
 
-// Search PATH for an executable file and return its absolute path.
-static int find_executable_in_path(const char *name, char *out_path,
+/** @brief Search PATH for an executable file and return its absolute path. */
+static int find_executable_on_path(const char *name, char *out_path,
                                    size_t out_path_size) {
   if (name == NULL || *name == '\0') {
     return 0;
@@ -909,33 +951,33 @@ static int find_executable_in_path(const char *name, char *out_path,
   return 0;
 }
 
-// Implementation of the "type" builtin.
+/** @brief Implementation of the `type` builtin. */
 static void handle_type(const char *name) {
   if (name == NULL || *name == '\0') {
     printf("type: missing operand");
-    print_shell_newline(stdout, STDOUT_FILENO);
+    print_newline_for_shell_io(stdout, STDOUT_FILENO);
     return;
   }
 
-  // 1) builtin
+  /* 1) Builtin command */
   if (is_builtin(name)) {
     printf("%s is a shell builtin", name);
-    print_shell_newline(stdout, STDOUT_FILENO);
+    print_newline_for_shell_io(stdout, STDOUT_FILENO);
     return;
   }
 
   char full_path[PATH_MAX];
-  if (find_executable_in_path(name, full_path, sizeof(full_path))) {
+  if (find_executable_on_path(name, full_path, sizeof(full_path))) {
     printf("%s is %s", name, full_path);
-    print_shell_newline(stdout, STDOUT_FILENO);
+    print_newline_for_shell_io(stdout, STDOUT_FILENO);
     return;
   }
 
   printf("%s: not found", name);
-  print_shell_newline(stdout, STDOUT_FILENO);
+  print_newline_for_shell_io(stdout, STDOUT_FILENO);
 }
 
-// Implementation of the "cd" builtin (supports ~ via HOME).
+/** @brief Implementation of the `cd` builtin (supports `~` via HOME). */
 static void handle_cd(const char *path) {
   if (path == NULL || *path == '\0') {
     return;
@@ -952,7 +994,7 @@ static void handle_cd(const char *path) {
 
   if (chdir(target) != 0) {
     printf("cd: %s: No such file or directory", path);
-    print_shell_newline(stdout, STDOUT_FILENO);
+    print_newline_for_shell_io(stdout, STDOUT_FILENO);
   }
 }
 
@@ -964,7 +1006,7 @@ static void handle_history(char **args, int arg_count) {
       start = 0;
     }
 
-    if (write_history_range_to_file(args[2], "a", start, g_history_count)) {
+    if (history_write_range_to_file(args[2], "a", start, g_history_count)) {
       g_history_unsaved_count = 0;
     }
     return;
@@ -972,7 +1014,7 @@ static void handle_history(char **args, int arg_count) {
 
   /* history -w <path>: overwrite with complete in-memory history. */
   if (arg_count == 3 && strcmp(args[1], "-w") == 0) {
-    if (write_history_range_to_file(args[2], "w", 0, g_history_count)) {
+    if (history_write_range_to_file(args[2], "w", 0, g_history_count)) {
       g_history_unsaved_count = 0;
     }
     return;
@@ -980,7 +1022,7 @@ static void handle_history(char **args, int arg_count) {
 
   /* history -r <path>: import entries from file into current session. */
   if (arg_count == 3 && strcmp(args[1], "-r") == 0) {
-    load_history_from_file(args[2]);
+    history_load_from_file(args[2]);
     return;
   }
 
@@ -998,48 +1040,51 @@ static void handle_history(char **args, int arg_count) {
 
   for (int i = start; i < g_history_count; i++) {
     printf("%5d  %s", i + 1, g_history[i]);
-    print_shell_newline(stdout, STDOUT_FILENO);
+    print_newline_for_shell_io(stdout, STDOUT_FILENO);
   }
 }
 
-static void load_history_from_histfile_env(void) {
+static void history_load_from_histfile_env(void) {
   /* HISTFILE controls startup restore source. */
   const char *history_path = getenv("HISTFILE");
   if (history_path == NULL || *history_path == '\0') {
     return;
   }
 
-  load_history_from_file(history_path);
+  history_load_from_file(history_path);
 
   /* Loaded data already exists on disk, so unsaved delta must be zero. */
   g_history_unsaved_count = 0;
 }
 
-static void write_history_to_histfile_env(void) {
+static void history_write_to_histfile_env(void) {
   /* HISTFILE controls exit-time save destination. */
   const char *history_path = getenv("HISTFILE");
   if (history_path == NULL || *history_path == '\0') {
     return;
   }
 
-  if (write_history_range_to_file(history_path, "w", 0, g_history_count)) {
+  if (history_write_range_to_file(history_path, "w", 0, g_history_count)) {
     g_history_unsaved_count = 0;
   }
 }
 
-// Parse command line into argv-like tokens.
-// Rules implemented here:
-// - Whitespace separates arguments when outside quotes.
-// - Single and double quotes remove delimiter meaning.
-// - Adjacent quoted/unquoted segments are concatenated.
-// - Backslash escaping is supported per current stage requirements.
+/**
+ * @brief Parse command line into argv-like tokens.
+ *
+ * Rules:
+ * - Whitespace separates arguments when outside quotes.
+ * - Single and double quotes remove delimiter meaning.
+ * - Adjacent quoted/unquoted segments are concatenated.
+ * - Backslash escaping follows current stage requirements.
+ */
 static int parse_arguments(char *line, char **args, int max_args) {
   char *read = line;
   char *write = line;
   int arg_count = 0;
 
   while (*read != '\0') {
-    while (is_inline_whitespace(*read)) {
+    while (is_space_or_tab(*read)) {
       read++;
     }
 
@@ -1055,12 +1100,13 @@ static int parse_arguments(char *line, char **args, int max_args) {
     int in_single_quote = 0;
     int in_double_quote = 0;
 
-    // Parse one shell word. Quote characters are removed and adjacent quoted
-    // segments are concatenated into the same argument.
+    /* Parse one shell word and concatenate adjacent quoted/unquoted segments.
+     */
     while (*read != '\0') {
       if (in_double_quote && *read == '\\') {
         char next = *(read + 1);
-        // In double quotes, only \" and \\ are special at this stage.
+        /* In double quotes, only \" and \\ are special in this implementation.
+         */
         if (is_escapable_in_double_quotes(next)) {
           read++;
           *write++ = *read++;
@@ -1069,7 +1115,7 @@ static int parse_arguments(char *line, char **args, int max_args) {
       }
 
       if (!in_single_quote && !in_double_quote && *read == '\\') {
-        // Outside quotes, backslash escapes the next character literally.
+        /* Outside quotes, backslash escapes the next character literally. */
         read++;
         if (*read != '\0') {
           *write++ = *read++;
@@ -1089,8 +1135,8 @@ static int parse_arguments(char *line, char **args, int max_args) {
         continue;
       }
 
-      if (!in_single_quote && !in_double_quote && is_inline_whitespace(*read)) {
-        while (is_inline_whitespace(*read)) {
+      if (!in_single_quote && !in_double_quote && is_space_or_tab(*read)) {
+        while (is_space_or_tab(*read)) {
           read++;
         }
         break;
@@ -1106,15 +1152,15 @@ static int parse_arguments(char *line, char **args, int max_args) {
   return arg_count;
 }
 
-// Split parsed tokens into:
-// 1) command arguments that should be passed to exec/builtin
-// 2) redirection targets/modes for stdout and stderr
-//
-// Supported redirection forms:
-// - stdout overwrite: > file, 1> file, >file, 1>file
-// - stdout append:    >> file, 1>> file, >>file, 1>>file
-// - stderr overwrite: 2> file, 2>file
-// - stderr append:    2>> file, 2>>file
+/**
+ * @brief Split tokens into command argv and redirection specification.
+ *
+ * Supported redirection forms:
+ * - stdout overwrite: > file, 1> file, >file, 1>file
+ * - stdout append:    >> file, 1>> file, >>file, 1>>file
+ * - stderr overwrite: 2> file, 2>file
+ * - stderr append:    2>> file, 2>>file
+ */
 
 static void assign_redirection(RedirectionSpec *redir, int fd, char *target,
                                int append) {
@@ -1128,7 +1174,7 @@ static void assign_redirection(RedirectionSpec *redir, int fd, char *target,
   redir->stdout_append = append;
 }
 
-// Parse tokens where target path is attached to the operator, e.g. 1>>file.
+/** @brief Parse inline redirection token, such as `1>>file`. */
 static int parse_inline_redirection_token(char *token, int *fd, int *append,
                                           char **target) {
   if (strncmp(token, "1>>", 3) == 0 && token[3] != '\0') {
@@ -1176,8 +1222,7 @@ static int parse_inline_redirection_token(char *token, int *fd, int *append,
   return 0;
 }
 
-// Parse tokens where target path is provided in the next argument, e.g. 2>
-// file.
+/** @brief Parse separated redirection token, such as `2>` followed by file. */
 static int parse_separate_redirection_token(const char *token, int *fd,
                                             int *append) {
   if (strcmp(token, ">>") == 0 || strcmp(token, "1>>") == 0) {
@@ -1245,7 +1290,7 @@ static int split_command_and_redirections(char **args, int arg_count,
   return command_arg_count;
 }
 
-// Redirect one descriptor to file and return a saved copy of the original fd.
+/** @brief Redirect one fd to file and return a saved copy of the original. */
 static int redirect_fd_to_file(int fd_to_redirect, const char *path,
                                int append) {
   int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
@@ -1270,8 +1315,10 @@ static int redirect_fd_to_file(int fd_to_redirect, const char *path,
   return saved_fd;
 }
 
-// Apply parsed redirections before command execution.
-// On failure, any already-applied redirection is rolled back.
+/**
+ * @brief Apply parsed redirections before command execution.
+ * @note On failure, already-applied redirections are rolled back.
+ */
 static int apply_redirections(const RedirectionSpec *redir,
                               SavedDescriptors *saved) {
   saved->saved_stdout = -1;
@@ -1300,7 +1347,7 @@ static int apply_redirections(const RedirectionSpec *redir,
   return 0;
 }
 
-// Restore descriptors after the command finishes.
+/** @brief Restore descriptors after command execution. */
 static void restore_redirections(SavedDescriptors *saved) {
   if (saved->saved_stderr >= 0) {
     restore_fd(saved->saved_stderr, STDERR_FILENO);
@@ -1313,7 +1360,7 @@ static void restore_redirections(SavedDescriptors *saved) {
   }
 }
 
-// Restore one descriptor from a saved copy.
+/** @brief Restore one descriptor from a saved copy. */
 static void restore_fd(int saved_fd, int target_fd) {
   if (target_fd == STDOUT_FILENO) {
     fflush(stdout);
@@ -1325,7 +1372,7 @@ static void restore_fd(int saved_fd, int target_fd) {
   close(saved_fd);
 }
 
-// Implementation of the "echo" builtin.
+/** @brief Implementation of the `echo` builtin. */
 static void handle_echo(char **args, int arg_count) {
   for (int i = 1; i < arg_count; i++) {
     if (i > 1) {
@@ -1333,26 +1380,26 @@ static void handle_echo(char **args, int arg_count) {
     }
     printf("%s", args[i]);
   }
-  print_shell_newline(stdout, STDOUT_FILENO);
+  print_newline_for_shell_io(stdout, STDOUT_FILENO);
 }
 
-// Implementation of the "pwd" builtin.
+/** @brief Implementation of the `pwd` builtin. */
 static void handle_pwd(void) {
   char cwd[PATH_MAX];
   if (getcwd(cwd, sizeof(cwd)) != NULL) {
     printf("%s", cwd);
-    print_shell_newline(stdout, STDOUT_FILENO);
+    print_newline_for_shell_io(stdout, STDOUT_FILENO);
   } else {
     perror("pwd");
   }
 }
 
-// Execute a non-builtin command by searching PATH and using fork/exec.
-static void execute_external_command(char **args) {
+/** @brief Execute a non-builtin command via PATH lookup and fork/exec. */
+static void execute_external_via_path(char **args) {
   char full_path[PATH_MAX];
-  if (!find_executable_in_path(args[0], full_path, sizeof(full_path))) {
+  if (!find_executable_on_path(args[0], full_path, sizeof(full_path))) {
     printf("%s: command not found", args[0]);
-    print_shell_newline(stdout, STDOUT_FILENO);
+    print_newline_for_shell_io(stdout, STDOUT_FILENO);
     return;
   }
 
@@ -1412,7 +1459,7 @@ static int run_builtin_command(char **args, int arg_count, int *should_exit) {
 
 static void exec_external_in_child(char **args) {
   char full_path[PATH_MAX];
-  if (!find_executable_in_path(args[0], full_path, sizeof(full_path))) {
+  if (!find_executable_on_path(args[0], full_path, sizeof(full_path))) {
     fprintf(stderr, "%s: command not found\n", args[0]);
     _exit(127);
   }
@@ -1421,7 +1468,7 @@ static void exec_external_in_child(char **args) {
   _exit(1);
 }
 
-static int find_pipe_token_index(char **args, int arg_count) {
+static int find_pipe_separator_index(char **args, int arg_count) {
   for (int i = 0; i < arg_count; i++) {
     if (strcmp(args[i], "|") == 0) {
       return i;
@@ -1430,7 +1477,7 @@ static int find_pipe_token_index(char **args, int arg_count) {
   return -1;
 }
 
-static int count_command_args(char **args) {
+static int count_argv_entries(char **args) {
   int count = 0;
   while (args[count] != NULL) {
     count++;
@@ -1438,7 +1485,7 @@ static int count_command_args(char **args) {
   return count;
 }
 
-static int split_pipeline_commands(char **args, int arg_count, char ***commands,
+static int split_pipeline_argv(char **args, int arg_count, char ***commands,
                                    int *command_count) {
   if (arg_count == 0) {
     return 0;
@@ -1469,11 +1516,11 @@ static int split_pipeline_commands(char **args, int arg_count, char ***commands,
   return 1;
 }
 
-static int execute_pipeline(char **args, int arg_count) {
+static int execute_pipeline_commands(char **args, int arg_count) {
   /* Convert argv with separators into N null-terminated command vectors. */
   char **commands[MAX_ARGS];
   int command_count = 0;
-  if (!split_pipeline_commands(args, arg_count, commands, &command_count)) {
+  if (!split_pipeline_argv(args, arg_count, commands, &command_count)) {
     return 0;
   }
 
@@ -1513,7 +1560,7 @@ static int execute_pipeline(char **args, int arg_count) {
         close(pipefd[1]);
       }
 
-      int cmd_arg_count = count_command_args(commands[i]);
+      int cmd_arg_count = count_argv_entries(commands[i]);
       int ignored_exit = 0;
       if (run_builtin_command(commands[i], cmd_arg_count, &ignored_exit)) {
         _exit(0);
@@ -1556,15 +1603,17 @@ static int execute_pipeline(char **args, int arg_count) {
   return 1;
 }
 
-// Dispatch one parsed command to builtin/external handlers.
-// Return 1 if shell should exit, otherwise 0.
-static int execute_command(char **args, int arg_count) {
+/**
+ * @brief Dispatch one parsed command to builtin/external handlers.
+ * @return 1 if shell should exit, otherwise 0.
+ */
+static int execute_single_command(char **args, int arg_count) {
   int should_exit = 0;
   if (run_builtin_command(args, arg_count, &should_exit)) {
     return should_exit;
   }
 
-  execute_external_command(args);
+  execute_external_via_path(args);
   return 0;
 }
 
@@ -1577,12 +1626,12 @@ int main(int argc, char *argv[]) {
     terminal_mode.enabled = 0;
   }
 
-  // Flush after every printf
+  /** Flush output eagerly to keep interactive prompt rendering responsive. */
   setbuf(stdout, NULL);
 
-  load_history_from_histfile_env();
+  history_load_from_histfile_env();
 
-  // REPL loop: prompt -> read -> parse -> redirect -> execute -> restore.
+  /** REPL flow: prompt -> read -> parse -> redirect -> execute -> restore. */
   char command[MAX_COMMAND_LENGTH];
   while (1) {
     printf("$ ");
@@ -1593,19 +1642,19 @@ int main(int argc, char *argv[]) {
     char raw_command[MAX_COMMAND_LENGTH];
     snprintf(raw_command, sizeof(raw_command), "%s", command);
 
-    // 1) Tokenize command line into raw shell arguments.
+    /* 1) Tokenize command line into shell arguments. */
     char *args[MAX_ARGS];
     int arg_count = parse_arguments(command, args, MAX_ARGS);
 
     if (arg_count > 0) {
       /* Record typed command before execution (includes history/exit itself).
        */
-      append_history_entry(raw_command);
+      history_append_entry(raw_command);
     }
 
-    int pipe_index = find_pipe_token_index(args, arg_count);
+    int pipe_index = find_pipe_separator_index(args, arg_count);
     if (pipe_index >= 0) {
-      execute_pipeline(args, arg_count);
+      execute_pipeline_commands(args, arg_count);
       continue;
     }
 
@@ -1614,30 +1663,30 @@ int main(int argc, char *argv[]) {
     SavedDescriptors saved;
 
     if (arg_count == 0) {
-      continue; 
+      continue;
     }
 
-    // 2) Separate redirection operators from command arguments.
+    /* 2) Separate redirection operators from command arguments. */
     int command_arg_count = split_command_and_redirections(
         args, arg_count, command_args, MAX_ARGS, &redir);
     if (command_arg_count <= 0) {
       continue;
     }
 
-    // 3) Apply fd redirections before executing the command.
+    /* 3) Apply fd redirections before executing the command. */
     if (apply_redirections(&redir, &saved) < 0) {
       continue;
     }
 
-    // 4) Execute builtin/external command.
-    int should_exit = execute_command(command_args, command_arg_count);
+    /* 4) Execute builtin/external command. */
+    int should_exit = execute_single_command(command_args, command_arg_count);
 
-    // 5) Always restore stdout/stderr for the next prompt.
+    /* 5) Restore stdout/stderr for the next prompt. */
     restore_redirections(&saved);
 
     if (should_exit) {
       /* Persist history snapshot on normal exit path. */
-      write_history_to_histfile_env();
+      history_write_to_histfile_env();
       break;
     }
   }
