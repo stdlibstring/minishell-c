@@ -536,6 +536,98 @@ static int parse_arguments(char *line, char **args, int max_args) {
 // - stdout append:    >> file, 1>> file, >>file, 1>>file
 // - stderr overwrite: 2> file, 2>file
 // - stderr append:    2>> file, 2>>file
+
+static void assign_redirection(RedirectionSpec *redir, int fd, char *target,
+                               int append) {
+  if (fd == STDERR_FILENO) {
+    redir->stderr_file = target;
+    redir->stderr_append = append;
+    return;
+  }
+
+  redir->stdout_file = target;
+  redir->stdout_append = append;
+}
+
+// Parse tokens where target path is attached to the operator, e.g. 1>>file.
+static int parse_inline_redirection_token(char *token, int *fd, int *append,
+                                          char **target) {
+  if (strncmp(token, "1>>", 3) == 0 && token[3] != '\0') {
+    *fd = STDOUT_FILENO;
+    *append = 1;
+    *target = token + 3;
+    return 1;
+  }
+
+  if (strncmp(token, "2>>", 3) == 0 && token[3] != '\0') {
+    *fd = STDERR_FILENO;
+    *append = 1;
+    *target = token + 3;
+    return 1;
+  }
+
+  if (strncmp(token, ">>", 2) == 0 && token[2] != '\0') {
+    *fd = STDOUT_FILENO;
+    *append = 1;
+    *target = token + 2;
+    return 1;
+  }
+
+  if (strncmp(token, "1>", 2) == 0 && token[2] != '\0') {
+    *fd = STDOUT_FILENO;
+    *append = 0;
+    *target = token + 2;
+    return 1;
+  }
+
+  if (strncmp(token, "2>", 2) == 0 && token[2] != '\0') {
+    *fd = STDERR_FILENO;
+    *append = 0;
+    *target = token + 2;
+    return 1;
+  }
+
+  if (token[0] == '>' && token[1] != '\0') {
+    *fd = STDOUT_FILENO;
+    *append = 0;
+    *target = token + 1;
+    return 1;
+  }
+
+  return 0;
+}
+
+// Parse tokens where target path is provided in the next argument, e.g. 2>
+// file.
+static int parse_separate_redirection_token(const char *token, int *fd,
+                                            int *append) {
+  if (strcmp(token, ">>") == 0 || strcmp(token, "1>>") == 0) {
+    *fd = STDOUT_FILENO;
+    *append = 1;
+    return 1;
+  }
+
+  if (strcmp(token, "2>>") == 0) {
+    *fd = STDERR_FILENO;
+    *append = 1;
+    return 1;
+  }
+
+  if (strcmp(token, ">") == 0 || strcmp(token, "1>") == 0) {
+    *fd = STDOUT_FILENO;
+    *append = 0;
+    return 1;
+  }
+
+  if (strcmp(token, "2>") == 0) {
+    *fd = STDERR_FILENO;
+    *append = 0;
+    return 1;
+  }
+
+  return 0;
+}
+
 static int split_command_and_redirections(char **args, int arg_count,
                                           char **command_args, int max_args,
                                           RedirectionSpec *redir) {
@@ -547,76 +639,20 @@ static int split_command_and_redirections(char **args, int arg_count,
 
   for (int i = 0; i < arg_count; i++) {
     char *token = args[i];
+    int fd = -1;
+    int append = 0;
+    char *inline_target = NULL;
 
-    if (strcmp(token, ">>") == 0 || strcmp(token, "1>>") == 0) {
+    if (parse_inline_redirection_token(token, &fd, &append, &inline_target)) {
+      assign_redirection(redir, fd, inline_target, append);
+      continue;
+    }
+
+    if (parse_separate_redirection_token(token, &fd, &append)) {
       if (i + 1 >= arg_count) {
         return -1;
       }
-      redir->stdout_file = args[++i];
-      redir->stdout_append = 1;
-      continue;
-    }
-
-    if (strcmp(token, "2>>") == 0) {
-      if (i + 1 >= arg_count) {
-        return -1;
-      }
-      redir->stderr_file = args[++i];
-      redir->stderr_append = 1;
-      continue;
-    }
-
-    if (strncmp(token, "1>>", 3) == 0 && token[3] != '\0') {
-      redir->stdout_file = token + 3;
-      redir->stdout_append = 1;
-      continue;
-    }
-
-    if (strncmp(token, ">>", 2) == 0 && token[2] != '\0') {
-      redir->stdout_file = token + 2;
-      redir->stdout_append = 1;
-      continue;
-    }
-
-    if (strncmp(token, "2>>", 3) == 0 && token[3] != '\0') {
-      redir->stderr_file = token + 3;
-      redir->stderr_append = 1;
-      continue;
-    }
-
-    if (strcmp(token, ">") == 0 || strcmp(token, "1>") == 0) {
-      if (i + 1 >= arg_count) {
-        return -1;
-      }
-      redir->stdout_file = args[++i];
-      redir->stdout_append = 0;
-      continue;
-    }
-
-    if (strcmp(token, "2>") == 0) {
-      if (i + 1 >= arg_count) {
-        return -1;
-      }
-      redir->stderr_file = args[++i];
-      redir->stderr_append = 0;
-      continue;
-    }
-
-    if (strncmp(token, "1>", 2) == 0 && token[2] != '\0') {
-      redir->stdout_file = token + 2;
-      redir->stdout_append = 0;
-      continue;
-    }
-
-    if (token[0] == '>' && token[1] != '\0') {
-      redir->stdout_file = token + 1;
-      redir->stdout_append = 0;
-      continue;
-    }
-
-    if (strncmp(token, "2>", 2) == 0 && token[2] != '\0') {
-      redir->stderr_file = token + 2;
-      redir->stderr_append = 0;
+      assign_redirection(redir, fd, args[++i], append);
       continue;
     }
 
