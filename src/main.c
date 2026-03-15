@@ -115,6 +115,29 @@ static void free_matches(char **items, size_t count) {
   free(items);
 }
 
+static size_t common_prefix_length(const char *a, const char *b) {
+  size_t i = 0;
+  while (a[i] != '\0' && b[i] != '\0' && a[i] == b[i]) {
+    i++;
+  }
+  return i;
+}
+
+static size_t longest_common_prefix_length(char **matches, size_t match_count) {
+  if (match_count == 0) {
+    return 0;
+  }
+
+  size_t lcp = strlen(matches[0]);
+  for (size_t i = 1; i < match_count; i++) {
+    size_t current = common_prefix_length(matches[0], matches[i]);
+    if (current < lcp) {
+      lcp = current;
+    }
+  }
+  return lcp;
+}
+
 static int collect_external_completion_matches(const char *prefix,
                                                size_t prefix_len,
                                                char ***matches,
@@ -234,7 +257,6 @@ static void restore_interactive_input_mode(TerminalMode *mode) {
 }
 
 // Try to autocomplete the first command word when TAB is pressed.
-// Only "echo" and "exit" are considered in this stage.
 static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
                                       TabCompletionState *state) {
   size_t word_start = 0;
@@ -280,6 +302,21 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
   }
 
   if (match_count > 1) {
+    size_t lcp_len = longest_common_prefix_length(matches, match_count);
+    if (lcp_len > partial_len) {
+      size_t add_len = lcp_len - partial_len;
+      if (*len + add_len < line_size) {
+        for (size_t i = partial_len; i < lcp_len; i++) {
+          line[(*len)++] = matches[0][i];
+          putchar(matches[0][i]);
+        }
+        line[*len] = '\0';
+        free_matches(matches, match_count);
+        reset_tab_completion_state(state);
+        return;
+      }
+    }
+
     if (state->pending_list && strcmp(state->prefix, current_prefix) == 0) {
       putchar('\n');
       for (size_t i = 0; i < match_count; i++) {
