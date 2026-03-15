@@ -6,6 +6,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#define MAX_COMMAND_LENGTH 256
+#define MAX_ARGS 128
+
 static int is_builtin(const char *cmd) {
   return strcmp(cmd, "echo") == 0 || strcmp(cmd, "type") == 0 ||
          strcmp(cmd, "exit") == 0 || strcmp(cmd, "pwd") == 0 ||
@@ -141,11 +144,82 @@ static int parse_arguments(char *line, char **args, int max_args) {
   return arg_count;
 }
 
+static void handle_echo(char **args, int arg_count) {
+  for (int i = 1; i < arg_count; i++) {
+    if (i > 1) {
+      printf(" ");
+    }
+    printf("%s", args[i]);
+  }
+  printf("\r\n");
+}
+
+static void handle_pwd(void) {
+  char cwd[PATH_MAX];
+  if (getcwd(cwd, sizeof(cwd)) != NULL) {
+    printf("%s\r\n", cwd);
+  } else {
+    perror("pwd");
+  }
+}
+
+static void execute_external_command(char **args) {
+  char full_path[PATH_MAX];
+  if (!find_executable_in_path(args[0], full_path, sizeof(full_path))) {
+    printf("%s: command not found\r\n", args[0]);
+    return;
+  }
+
+  pid_t pid = fork();
+  if (pid == 0) {
+    execv(full_path, args);
+    exit(1);
+  }
+
+  if (pid > 0) {
+    waitpid(pid, NULL, 0);
+  }
+}
+
+static int execute_command(char **args, int arg_count) {
+  char *cmd = args[0];
+
+  if (strcmp(cmd, "exit") == 0) {
+    return 1;
+  }
+
+  if (strcmp(cmd, "echo") == 0) {
+    handle_echo(args, arg_count);
+    return 0;
+  }
+
+  if (strcmp(cmd, "pwd") == 0) {
+    handle_pwd();
+    return 0;
+  }
+
+  if (strcmp(cmd, "cd") == 0) {
+    handle_cd(arg_count > 1 ? args[1] : NULL);
+    return 0;
+  }
+
+  if (strcmp(cmd, "type") == 0) {
+    handle_type(arg_count > 1 ? args[1] : NULL);
+    return 0;
+  }
+
+  execute_external_command(args);
+  return 0;
+}
+
 int main(int argc, char *argv[]) {
+  (void)argc;
+  (void)argv;
+
   // Flush after every printf
   setbuf(stdout, NULL);
 
-  char command[256];
+  char command[MAX_COMMAND_LENGTH];
   while (1) {
     printf("$ ");
     if (fgets(command, sizeof(command), stdin) == NULL) {
@@ -154,52 +228,15 @@ int main(int argc, char *argv[]) {
 
     // 去除多余的换行符
     command[strcspn(command, "\r\n")] = 0;
-    char *args[128];
-    int arg_count = parse_arguments(command, args, 128);
+    char *args[MAX_ARGS];
+    int arg_count = parse_arguments(command, args, MAX_ARGS);
 
     if (arg_count == 0) {
       continue; // 如果没有输入命令，继续下一轮循环
     }
 
-    char *cmd = args[0];
-
-    if (strcmp(cmd, "exit") == 0) {
+    if (execute_command(args, arg_count)) {
       break;
-    } else if (strcmp(cmd, "echo") == 0) {
-      for (int i = 1; i < arg_count; i++) {
-        if (i > 1) {
-          printf(" ");
-        }
-        printf("%s", args[i]);
-      }
-      printf("\r\n");
-    } else if (strcmp(cmd, "pwd") == 0) {
-      char cwd[PATH_MAX];
-      if (getcwd(cwd, sizeof(cwd)) != NULL) {
-        printf("%s\r\n", cwd);
-      } else {
-        perror("pwd");
-      }
-    } else if (strcmp(cmd, "cd") == 0) {
-      handle_cd(arg_count > 1 ? args[1] : NULL);
-    } else if (strcmp(cmd, "type") == 0) {
-      handle_type(arg_count > 1 ? args[1] : NULL);
-    } else {
-      char full_path[PATH_MAX];
-      if (!find_executable_in_path(cmd, full_path, sizeof(full_path))) {
-        printf("%s: command not found\r\n", cmd);
-        continue;
-      }
-
-      pid_t pid = fork();
-      if (pid == 0) {
-        execv(full_path, args);
-        exit(1);
-      }
-
-      if (pid > 0) {
-        waitpid(pid, NULL, 0);
-      }
     }
   }
 
