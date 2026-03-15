@@ -1165,153 +1165,117 @@ static int count_command_args(char **args) {
   return count;
 }
 
-static void run_builtin_with_redirected_stdio(char **args, int arg_count,
-                                              int input_fd, int output_fd) {
-  int saved_stdin = -1;
-  int saved_stdout = -1;
-
-  if (input_fd >= 0) {
-    saved_stdin = dup(STDIN_FILENO);
-    dup2(input_fd, STDIN_FILENO);
-  }
-
-  if (output_fd >= 0) {
-    saved_stdout = dup(STDOUT_FILENO);
-    dup2(output_fd, STDOUT_FILENO);
-  }
-
-  int ignored_exit = 0;
-  run_builtin_command(args, arg_count, &ignored_exit);
-
-  if (saved_stdout >= 0) {
-    restore_fd(saved_stdout, STDOUT_FILENO);
-  }
-  if (saved_stdin >= 0) {
-    restore_fd(saved_stdin, STDIN_FILENO);
-  }
-}
-
-static void run_builtin_in_child_and_exit(char **args, int arg_count,
-                                          int input_fd, int output_fd) {
-  if (input_fd >= 0) {
-    dup2(input_fd, STDIN_FILENO);
-  }
-  if (output_fd >= 0) {
-    dup2(output_fd, STDOUT_FILENO);
-  }
-
-  int ignored_exit = 0;
-  run_builtin_command(args, arg_count, &ignored_exit);
-  _exit(0);
-}
-
-static int execute_two_command_pipeline(char **args, int arg_count,
-                                        int pipe_index) {
-  if (pipe_index <= 0 || pipe_index >= arg_count - 1) {
+static int split_pipeline_commands(char **args, int arg_count, char ***commands,
+                                   int *command_count) {
+  if (arg_count == 0) {
     return 0;
   }
 
-  args[pipe_index] = NULL;
-  char **left_args = args;
-  char **right_args = &args[pipe_index + 1];
-  int left_arg_count = count_command_args(left_args);
-  int right_arg_count = count_command_args(right_args);
+  int count = 0;
+  commands[count++] = args;
 
-  int left_is_builtin = is_builtin(left_args[0]);
-  int right_is_builtin = is_builtin(right_args[0]);
+  for (int i = 0; i < arg_count; i++) {
+    if (strcmp(args[i], "|") == 0) {
+      args[i] = NULL;
 
-  int pipefd[2];
-  if (pipe(pipefd) != 0) {
+      if (count >= MAX_ARGS) {
+        return 0;
+      }
+
+      commands[count++] = &args[i + 1];
+    }
+  }
+
+  for (int i = 0; i < count; i++) {
+    if (commands[i][0] == NULL) {
+      return 0;
+    }
+  }
+
+  *command_count = count;
+  return 1;
+}
+
+static int execute_pipeline(char **args, int arg_count) {
+  char **commands[MAX_ARGS];
+  int command_count = 0;
+  if (!split_pipeline_commands(args, arg_count, commands, &command_count)) {
     return 0;
   }
 
-  if (!left_is_builtin && !right_is_builtin) {
-    pid_t left_pid = fork();
-    if (left_pid == 0) {
-      dup2(pipefd[1], STDOUT_FILENO);
-      close(pipefd[0]);
-      close(pipefd[1]);
-      exec_external_in_child(left_args);
+  pid_t pids[MAX_ARGS];
+  int pid_count = 0;
+  int prev_read_fd = -1;
+
+  for (int i = 0; i < command_count; i++) {
+    int pipefd[2] = {-1, -1};
+    if (i < command_count - 1) {
+      if (pipe(pipefd) != 0) {
+        if (prev_read_fd >= 0) {
+          close(prev_read_fd);
+        }
+        for (int j = 0; j < pid_count; j++) {
+          waitpid(pids[j], NULL, 0);
+        }
+        return 0;
+      }
     }
 
-    if (left_pid < 0) {
-      close(pipefd[0]);
-      close(pipefd[1]);
+    pid_t pid = fork();
+    if (pid == 0) {
+      if (prev_read_fd >= 0) {
+        dup2(prev_read_fd, STDIN_FILENO);
+      }
+      if (i < command_count - 1) {
+        dup2(pipefd[1], STDOUT_FILENO);
+      }
+
+      if (prev_read_fd >= 0) {
+        close(prev_read_fd);
+      }
+      if (i < command_count - 1) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+      }
+
+      int cmd_arg_count = count_command_args(commands[i]);
+      int ignored_exit = 0;
+      if (run_builtin_command(commands[i], cmd_arg_count, &ignored_exit)) {
+        _exit(0);
+      }
+
+      exec_external_in_child(commands[i]);
+    }
+
+    if (pid < 0) {
+      if (prev_read_fd >= 0) {
+        close(prev_read_fd);
+      }
+      if (i < command_count - 1) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+      }
+      for (int j = 0; j < pid_count; j++) {
+        waitpid(pids[j], NULL, 0);
+      }
       return 0;
     }
 
-    pid_t right_pid = fork();
-    if (right_pid == 0) {
-      dup2(pipefd[0], STDIN_FILENO);
+    pids[pid_count++] = pid;
+
+    if (prev_read_fd >= 0) {
+      close(prev_read_fd);
+    }
+    if (i < command_count - 1) {
       close(pipefd[1]);
-      close(pipefd[0]);
-      exec_external_in_child(right_args);
+      prev_read_fd = pipefd[0];
+    } else {
+      prev_read_fd = -1;
     }
-
-    close(pipefd[0]);
-    close(pipefd[1]);
-
-    if (right_pid < 0) {
-      waitpid(left_pid, NULL, 0);
-      return 0;
-    }
-
-    waitpid(left_pid, NULL, 0);
-    waitpid(right_pid, NULL, 0);
-    return 1;
   }
 
-  if (left_is_builtin && !right_is_builtin) {
-    pid_t right_pid = fork();
-    if (right_pid == 0) {
-      dup2(pipefd[0], STDIN_FILENO);
-      close(pipefd[1]);
-      close(pipefd[0]);
-      exec_external_in_child(right_args);
-    }
-
-    close(pipefd[0]);
-    run_builtin_with_redirected_stdio(left_args, left_arg_count, -1, pipefd[1]);
-    close(pipefd[1]);
-
-    if (right_pid > 0) {
-      waitpid(right_pid, NULL, 0);
-    }
-    return 1;
-  }
-
-  if (!left_is_builtin && right_is_builtin) {
-    pid_t left_pid = fork();
-    if (left_pid == 0) {
-      dup2(pipefd[1], STDOUT_FILENO);
-      close(pipefd[0]);
-      close(pipefd[1]);
-      exec_external_in_child(left_args);
-    }
-
-    close(pipefd[1]);
-    run_builtin_with_redirected_stdio(right_args, right_arg_count, pipefd[0],
-                                      -1);
-    close(pipefd[0]);
-
-    if (left_pid > 0) {
-      waitpid(left_pid, NULL, 0);
-    }
-    return 1;
-  }
-
-  pid_t left_builtin_pid = fork();
-  if (left_builtin_pid == 0) {
-    close(pipefd[0]);
-    run_builtin_in_child_and_exit(left_args, left_arg_count, -1, pipefd[1]);
-  }
-
-  close(pipefd[1]);
-  run_builtin_with_redirected_stdio(right_args, right_arg_count, pipefd[0], -1);
-  close(pipefd[0]);
-
-  if (left_builtin_pid > 0) {
-    waitpid(left_builtin_pid, NULL, 0);
+  for (int i = 0; i < pid_count; i++) {
+    waitpid(pids[i], NULL, 0);
   }
 
   return 1;
@@ -1355,7 +1319,7 @@ int main(int argc, char *argv[]) {
 
     int pipe_index = find_pipe_token_index(args, arg_count);
     if (pipe_index >= 0) {
-      execute_two_command_pipeline(args, arg_count, pipe_index);
+      execute_pipeline(args, arg_count);
       continue;
     }
 
