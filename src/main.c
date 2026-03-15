@@ -58,6 +58,7 @@ typedef struct {
 } FileCompletionEntry;
 
 static void restore_fd(int saved_fd, int target_fd);
+static size_t common_prefix_length(const char *a, const char *b);
 
 static int compare_strings(const void *a, const void *b) {
   const char *const *sa = (const char *const *)a;
@@ -69,6 +70,23 @@ static int compare_file_completion_entries(const void *a, const void *b) {
   const FileCompletionEntry *ea = (const FileCompletionEntry *)a;
   const FileCompletionEntry *eb = (const FileCompletionEntry *)b;
   return strcmp(ea->text, eb->text);
+}
+
+static size_t
+longest_common_prefix_length_for_entries(FileCompletionEntry *entries,
+                                         size_t entry_count) {
+  if (entry_count == 0) {
+    return 0;
+  }
+
+  size_t lcp = strlen(entries[0].text);
+  for (size_t i = 1; i < entry_count; i++) {
+    size_t current = common_prefix_length(entries[0].text, entries[i].text);
+    if (current < lcp) {
+      lcp = current;
+    }
+  }
+  return lcp;
 }
 
 static void reset_tab_completion_state(TabCompletionState *state) {
@@ -428,6 +446,22 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
     }
 
     if (entry_count > 1) {
+      size_t lcp_len =
+          longest_common_prefix_length_for_entries(entries, entry_count);
+      if (lcp_len > partial_len) {
+        size_t add_len = lcp_len - partial_len;
+        if (*len + add_len < line_size) {
+          for (size_t i = partial_len; i < lcp_len; i++) {
+            line[(*len)++] = entries[0].text[i];
+            putchar(entries[0].text[i]);
+          }
+          line[*len] = '\0';
+          free_file_completion_entries(entries, entry_count);
+          reset_tab_completion_state(state);
+          return;
+        }
+      }
+
       if (state->pending_list && !state->pending_first_token &&
           strcmp(state->prefix, current_prefix) == 0) {
         putchar('\n');
