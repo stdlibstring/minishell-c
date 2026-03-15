@@ -20,6 +20,16 @@ int main(int argc, char *argv[]) {
       break;
     } else if(strncmp(command, "echo ", 5) == 0) {
       printf("%s\r\n", command + 5);
+    } else if(strncmp(command, "type", 5) == 0) {
+      if(strcmp(command + 5, "exit") == 0) {
+        printf("exit is a shell builtin\r\n");
+      } else if(strcmp(command + 5, "echo") == 0) {
+        printf("echo is a shell builtin\r\n");
+      } else if(strcmp(command + 5, "type") == 0) {
+        printf("type is a shell builtin\r\n");
+      } else {
+        printf("%s: not found\r\n", command);
+      }
     } else {
       printf("%s: command not found\r\n", command);
     }
