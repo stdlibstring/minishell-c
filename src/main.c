@@ -72,7 +72,16 @@ static void handle_cd(const char *path) {
     return;
   }
 
-  if (chdir(path) != 0) {
+  const char *target = path;
+  if (strcmp(path, "~") == 0) {
+    const char *home = getenv("HOME");
+    if (home == NULL || *home == '\0') {
+      return;
+    }
+    target = home;
+  }
+
+  if (chdir(target) != 0) {
     printf("cd: %s: No such file or directory\r\n", path);
   }
 }
