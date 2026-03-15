@@ -225,7 +225,8 @@ static int collect_completion_matches(const char *prefix, size_t prefix_len,
 }
 
 static int collect_single_filename_match(const char *prefix, size_t prefix_len,
-                                         char *matched, size_t matched_size) {
+                                         char *matched, size_t matched_size,
+                                         int *matched_is_directory) {
   char directory[MAX_COMMAND_LENGTH];
   char output_prefix[MAX_COMMAND_LENGTH];
   const char *name_prefix = prefix;
@@ -257,6 +258,7 @@ static int collect_single_filename_match(const char *prefix, size_t prefix_len,
   }
 
   int match_count = 0;
+  int single_is_directory = 0;
   struct dirent *entry;
   while ((entry = readdir(dp)) != NULL) {
     const char *name = entry->d_name;
@@ -275,6 +277,9 @@ static int collect_single_filename_match(const char *prefix, size_t prefix_len,
 
     if (match_count == 0) {
       snprintf(matched, matched_size, "%s", candidate);
+      struct stat st;
+      single_is_directory =
+          (stat(candidate, &st) == 0 && S_ISDIR(st.st_mode)) ? 1 : 0;
       match_count = 1;
       continue;
     }
@@ -286,6 +291,9 @@ static int collect_single_filename_match(const char *prefix, size_t prefix_len,
   }
 
   closedir(dp);
+  if (match_count == 1) {
+    *matched_is_directory = single_is_directory;
+  }
   return match_count == 1;
 }
 
@@ -340,7 +348,8 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
     word_start--;
   }
 
-  if (word_start == *len) {
+  int first_token = is_first_token_position(line, word_start);
+  if (word_start == *len && first_token) {
     reset_tab_completion_state(state);
     return;
   }
@@ -356,18 +365,19 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
   current_prefix[partial_len] = '\0';
 
   // Argument position: complete from current directory when there is exactly
-  // one filename match.
-  if (!is_first_token_position(line, word_start)) {
+  // one file/path match.
+  if (!first_token) {
     char matched_filename[MAX_COMMAND_LENGTH];
-    if (!collect_single_filename_match(current_prefix, partial_len,
-                                       matched_filename,
-                                       sizeof(matched_filename))) {
+    int matched_is_directory = 0;
+    if (!collect_single_filename_match(
+            current_prefix, partial_len, matched_filename,
+            sizeof(matched_filename), &matched_is_directory)) {
       reset_tab_completion_state(state);
       return;
     }
 
     size_t matched_len = strlen(matched_filename);
-    size_t add_len = (matched_len - partial_len) + 1; // + trailing space
+    size_t add_len = (matched_len - partial_len) + 1;
     if (*len + add_len >= line_size) {
       reset_tab_completion_state(state);
       return;
@@ -377,8 +387,15 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
       line[(*len)++] = matched_filename[i];
       putchar(matched_filename[i]);
     }
-    line[(*len)++] = ' ';
-    putchar(' ');
+
+    if (matched_is_directory) {
+      line[(*len)++] = '/';
+      putchar('/');
+    } else {
+      line[(*len)++] = ' ';
+      putchar(' ');
+    }
+
     line[*len] = '\0';
     reset_tab_completion_state(state);
     return;
