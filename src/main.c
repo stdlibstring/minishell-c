@@ -224,6 +224,46 @@ static int collect_completion_matches(const char *prefix, size_t prefix_len,
   return 0;
 }
 
+static int collect_single_filename_match(const char *prefix, size_t prefix_len,
+                                         char *matched, size_t matched_size) {
+  DIR *dp = opendir(".");
+  if (dp == NULL) {
+    return 0;
+  }
+
+  int match_count = 0;
+  struct dirent *entry;
+  while ((entry = readdir(dp)) != NULL) {
+    const char *name = entry->d_name;
+    if (!starts_with(name, prefix, prefix_len)) {
+      continue;
+    }
+
+    if (match_count == 0) {
+      snprintf(matched, matched_size, "%s", name);
+      match_count = 1;
+      continue;
+    }
+
+    if (strcmp(matched, name) != 0) {
+      match_count = 2;
+      break;
+    }
+  }
+
+  closedir(dp);
+  return match_count == 1;
+}
+
+static int is_first_token_position(const char *line, size_t word_start) {
+  for (size_t i = 0; i < word_start; i++) {
+    if (!is_inline_whitespace(line[i])) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 static int enable_interactive_input_mode(TerminalMode *mode) {
   mode->enabled = 0;
 
@@ -256,7 +296,7 @@ static void restore_interactive_input_mode(TerminalMode *mode) {
   mode->enabled = 0;
 }
 
-// Try to autocomplete the first command word when TAB is pressed.
+// Try to autocomplete the current token when TAB is pressed.
 static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
                                       TabCompletionState *state) {
   size_t word_start = 0;
@@ -284,6 +324,35 @@ static void autocomplete_command_live(char *line, size_t *len, size_t line_size,
   char current_prefix[MAX_COMMAND_LENGTH];
   memcpy(current_prefix, line + word_start, partial_len);
   current_prefix[partial_len] = '\0';
+
+  // Argument position: complete from current directory when there is exactly
+  // one filename match.
+  if (!is_first_token_position(line, word_start)) {
+    char matched_filename[MAX_COMMAND_LENGTH];
+    if (!collect_single_filename_match(current_prefix, partial_len,
+                                       matched_filename,
+                                       sizeof(matched_filename))) {
+      reset_tab_completion_state(state);
+      return;
+    }
+
+    size_t matched_len = strlen(matched_filename);
+    size_t add_len = (matched_len - partial_len) + 1; // + trailing space
+    if (*len + add_len >= line_size) {
+      reset_tab_completion_state(state);
+      return;
+    }
+
+    for (size_t i = partial_len; i < matched_len; i++) {
+      line[(*len)++] = matched_filename[i];
+      putchar(matched_filename[i]);
+    }
+    line[(*len)++] = ' ';
+    putchar(' ');
+    line[*len] = '\0';
+    reset_tab_completion_state(state);
+    return;
+  }
 
   char **matches = NULL;
   size_t match_count = 0;
