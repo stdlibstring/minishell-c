@@ -108,6 +108,11 @@ static void autocomplete_builtin_live(char *line, size_t *len,
     }
   }
 
+  if (match_count == 0) {
+    putchar('\a');
+    return;
+  }
+
   if (match_count != 1) {
     return;
   }
