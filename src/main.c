@@ -3,10 +3,42 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <limits.h>
 
 static int is_builtin(const char *cmd) {
   return strcmp(cmd, "echo") == 0 || strcmp(cmd, "type") == 0 || strcmp(cmd, "exit") == 0;
+}
+
+static int find_executable_in_path(const char *name, char *out_path, size_t out_path_size) {
+  if (name == NULL || *name == '\0') {
+    return 0;
+  }
+
+  char *path_env = getenv("PATH");
+  if (path_env == NULL || *path_env == '\0') {
+    return 0;
+  }
+
+  char *path_copy = strdup(path_env);
+  if (path_copy == NULL) {
+    return 0;
+  }
+
+  for (char *dir = strtok(path_copy, ":"); dir != NULL; dir = strtok(NULL, ":")) {
+    char full_path[PATH_MAX];
+    snprintf(full_path, sizeof(full_path), "%s/%s", dir, name);
+
+    struct stat st;
+    if (stat(full_path, &st) == 0 && S_ISREG(st.st_mode) && access(full_path, X_OK) == 0) {
+      snprintf(out_path, out_path_size, "%s", full_path);
+      free(path_copy);
+      return 1;
+    }
+  }
+
+  free(path_copy);
+  return 0;
 }
 
 static void handle_type(const char *name) {
@@ -21,68 +53,71 @@ static void handle_type(const char *name) {
     return;
   }
 
-  // 2) search PATH
-  char *path_env = getenv("PATH");
-  if(path_env == NULL || *path_env == '\0') {
-    printf("%s not found\r\n", name);
+  char full_path[PATH_MAX];
+  if (find_executable_in_path(name, full_path, sizeof(full_path))) {
+    printf("%s is %s\r\n", name, full_path);
     return;
   }
 
-  char *path = strdup(path_env);
-  if (path == NULL) {
-    printf("%s: not found\r\n", name);
-    return;
-  }
-
-  for(char *dir = strtok(path, ":"); dir != NULL; dir = strtok(NULL, ":")) {
-    char full_path[PATH_MAX];
-    // ππ‘ÏÕÍ’˚¬∑æ∂
-    snprintf(full_path, sizeof(full_path), "%s/%s", dir, name);
-
-    struct stat st;
-    if(stat(full_path, &st) == 0 && S_ISREG(st.st_mode)) {
-      if(access(full_path, X_OK) == 0) {
-      printf("%s is %s\r\n", name, full_path);
-      free(path);
-      return;
-      }
-    } 
-  }
-
-  printf("%s not found\r\n", name);
-  free(path);
+  printf("%s: not found\r\n", name);
 }
 int main(int argc, char *argv[]) {
   // Flush after every printf
   setbuf(stdout, NULL);
 
-  // printf("$ ");
-
   char command[256];
   while(1){
     printf("$ ");
-    fgets(command, sizeof(command), stdin);
-
-    // »•≥˝∂‡”‡µƒªª––∑˚
-    command[strcspn(command, "\r\n")] = 0;
-
-    char *cmd = strtok(command, " \r\n");
-    
-
-    if(cmd == NULL) {
-      continue; // »Áπ˚√ª”– ‰»Î√¸¡Ó£¨ºÃ–¯œ¬“ª¬÷—≠ª∑
+    if (fgets(command, sizeof(command), stdin) == NULL) {
+      break;
     }
+
+    // ÂéªÈô§Â§ö‰ΩôÁöÑÊç¢Ë°åÁ¨¶
+    command[strcspn(command, "\r\n")] = 0;
+    char *args[128];
+    int arg_count = 0;
+
+    char *token = strtok(command, " \t");
+    while (token != NULL && arg_count < 127) {
+      args[arg_count++] = token;
+      token = strtok(NULL, " \t");
+    }
+    args[arg_count] = NULL;
+    
+    if(arg_count == 0) {
+      continue; // Â¶ÇÊûúÊ≤°ÊúâËæìÂÖ•ÂëΩ‰ª§ÔºåÁªßÁª≠‰∏ã‰∏ÄËΩÆÂæ™ÁéØ
+    }
+
+    char *cmd = args[0];
 
     if(strcmp(cmd, "exit") == 0) {
       break;
     } else if(strcmp(cmd, "echo") == 0) {
-      char *arg = strtok(NULL, "");
-      printf("%s\r\n", arg ? arg : "");
+      for (int i = 1; i < arg_count; i++) {
+        if (i > 1) {
+          printf(" ");
+        }
+        printf("%s", args[i]);
+      }
+      printf("\r\n");
     } else if(strcmp(cmd, "type") == 0) {
-      char *arg = strtok(NULL, " \t");
-      handle_type(arg);
+      handle_type(arg_count > 1 ? args[1] : NULL);
     } else {
-      printf("%s: command not found\r\n", cmd);
+      char full_path[PATH_MAX];
+      if (!find_executable_in_path(cmd, full_path, sizeof(full_path))) {
+        printf("%s: command not found\r\n", cmd);
+        continue;
+      }
+
+      pid_t pid = fork();
+      if (pid == 0) {
+        execv(full_path, args);
+        exit(1);
+      }
+
+      if (pid > 0) {
+        waitpid(pid, NULL, 0);
+      }
     }
   }
   
