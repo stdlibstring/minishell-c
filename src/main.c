@@ -1,3 +1,4 @@
+#include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
@@ -44,6 +45,80 @@ typedef struct {
 } TerminalMode;
 
 static void restore_fd(int saved_fd, int target_fd);
+
+static void consider_completion_candidate(const char *name, const char *prefix,
+                                          size_t prefix_len, char *matched,
+                                          size_t matched_size,
+                                          int *match_count) {
+  if (!starts_with(name, prefix, prefix_len)) {
+    return;
+  }
+
+  if (*match_count == 0) {
+    snprintf(matched, matched_size, "%s", name);
+    *match_count = 1;
+    return;
+  }
+
+  if (strcmp(matched, name) == 0) {
+    return;
+  }
+
+  *match_count = 2;
+}
+
+static void gather_external_completion_candidates(const char *prefix,
+                                                  size_t prefix_len,
+                                                  char *matched,
+                                                  size_t matched_size,
+                                                  int *match_count) {
+  const char *path_env = getenv("PATH");
+  if (path_env == NULL || *path_env == '\0') {
+    return;
+  }
+
+  size_t path_len = strlen(path_env);
+  char *path_copy = malloc(path_len + 1);
+  if (path_copy == NULL) {
+    return;
+  }
+  memcpy(path_copy, path_env, path_len + 1);
+
+  for (char *dir = strtok(path_copy, ":"); dir != NULL;
+       dir = strtok(NULL, ":")) {
+    DIR *dp = opendir(dir);
+    if (dp == NULL) {
+      continue;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(dp)) != NULL) {
+      const char *name = entry->d_name;
+      if (!starts_with(name, prefix, prefix_len)) {
+        continue;
+      }
+
+      char full_path[PATH_MAX];
+      if (snprintf(full_path, sizeof(full_path), "%s/%s", dir, name) >=
+          (int)sizeof(full_path)) {
+        continue;
+      }
+
+      struct stat st;
+      if (stat(full_path, &st) != 0 || !S_ISREG(st.st_mode) ||
+          access(full_path, X_OK) != 0) {
+        continue;
+      }
+
+      consider_completion_candidate(name, prefix, prefix_len, matched,
+                                    matched_size, match_count);
+    }
+
+    closedir(dp);
+  }
+
+  free(path_copy);
+}
 
 static int enable_interactive_input_mode(TerminalMode *mode) {
   mode->enabled = 0;
@@ -98,15 +173,17 @@ static void autocomplete_builtin_live(char *line, size_t *len,
 
   static const char *candidates[] = {"echo", "exit"};
   size_t partial_len = word_end - word_start;
-  const char *matched = NULL;
+  char matched[MAX_COMMAND_LENGTH];
+  matched[0] = '\0';
   int match_count = 0;
 
   for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
-    if (starts_with(candidates[i], line + word_start, partial_len)) {
-      matched = candidates[i];
-      match_count++;
-    }
+    consider_completion_candidate(candidates[i], line + word_start, partial_len,
+                                  matched, sizeof(matched), &match_count);
   }
+
+  gather_external_completion_candidates(line + word_start, partial_len, matched,
+                                        sizeof(matched), &match_count);
 
   if (match_count == 0) {
     putchar('\a');
