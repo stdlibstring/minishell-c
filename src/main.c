@@ -20,7 +20,7 @@ int main(int argc, char *argv[]) {
       break;
     } else if(strncmp(command, "echo ", 5) == 0) {
       printf("%s\r\n", command + 5);
-    } else if(strncmp(command, "type", 5) == 0) {
+    } else if(strncmp(command, "type ", 5) == 0) {
       if(strcmp(command + 5, "exit") == 0) {
         printf("exit is a shell builtin\r\n");
       } else if(strcmp(command + 5, "echo") == 0) {
