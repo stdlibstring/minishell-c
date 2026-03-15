@@ -174,9 +174,11 @@ static int parse_arguments(char *line, char **args, int max_args) {
 static int split_command_and_stdout_redirection(char **args, int arg_count,
                                                 char **command_args,
                                                 int max_args,
-                                                char **stdout_file) {
+                                                char **stdout_file,
+                                                char **stderr_file) {
   int command_arg_count = 0;
   *stdout_file = NULL;
+  *stderr_file = NULL;
 
   for (int i = 0; i < arg_count; i++) {
     char *token = args[i];
@@ -186,6 +188,14 @@ static int split_command_and_stdout_redirection(char **args, int arg_count,
         return -1;
       }
       *stdout_file = args[++i];
+      continue;
+    }
+
+    if (strcmp(token, "2>") == 0) {
+      if (i + 1 >= arg_count) {
+        return -1;
+      }
+      *stderr_file = args[++i];
       continue;
     }
 
@@ -199,6 +209,11 @@ static int split_command_and_stdout_redirection(char **args, int arg_count,
       continue;
     }
 
+    if (strncmp(token, "2>", 2) == 0 && token[2] != '\0') {
+      *stderr_file = token + 2;
+      continue;
+    }
+
     if (command_arg_count >= max_args - 1) {
       break;
     }
@@ -209,32 +224,37 @@ static int split_command_and_stdout_redirection(char **args, int arg_count,
   return command_arg_count;
 }
 
-static int redirect_stdout_to_file(const char *path) {
+static int redirect_fd_to_file(int fd_to_redirect, const char *path) {
   int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0) {
     return -1;
   }
 
-  int saved_stdout = dup(STDOUT_FILENO);
-  if (saved_stdout < 0) {
+  int saved_fd = dup(fd_to_redirect);
+  if (saved_fd < 0) {
     close(fd);
     return -1;
   }
 
-  if (dup2(fd, STDOUT_FILENO) < 0) {
+  if (dup2(fd, fd_to_redirect) < 0) {
     close(fd);
-    close(saved_stdout);
+    close(saved_fd);
     return -1;
   }
 
   close(fd);
-  return saved_stdout;
+  return saved_fd;
 }
 
-static void restore_stdout(int saved_stdout) {
-  fflush(stdout);
-  dup2(saved_stdout, STDOUT_FILENO);
-  close(saved_stdout);
+static void restore_fd(int saved_fd, int target_fd) {
+  if (target_fd == STDOUT_FILENO) {
+    fflush(stdout);
+  } else if (target_fd == STDERR_FILENO) {
+    fflush(stderr);
+  }
+
+  dup2(saved_fd, target_fd);
+  close(saved_fd);
 }
 
 static void handle_echo(char **args, int arg_count) {
@@ -325,29 +345,45 @@ int main(int argc, char *argv[]) {
     int arg_count = parse_arguments(command, args, MAX_ARGS);
     char *command_args[MAX_ARGS];
     char *stdout_file = NULL;
+    char *stderr_file = NULL;
 
     if (arg_count == 0) {
       continue; // 如果没有输入命令，继续下一轮循环
     }
 
     int command_arg_count = split_command_and_stdout_redirection(
-        args, arg_count, command_args, MAX_ARGS, &stdout_file);
+        args, arg_count, command_args, MAX_ARGS, &stdout_file, &stderr_file);
     if (command_arg_count <= 0) {
       continue;
     }
 
     int saved_stdout = -1;
+    int saved_stderr = -1;
     if (stdout_file != NULL) {
-      saved_stdout = redirect_stdout_to_file(stdout_file);
+      saved_stdout = redirect_fd_to_file(STDOUT_FILENO, stdout_file);
       if (saved_stdout < 0) {
+        continue;
+      }
+    }
+
+    if (stderr_file != NULL) {
+      saved_stderr = redirect_fd_to_file(STDERR_FILENO, stderr_file);
+      if (saved_stderr < 0) {
+        if (saved_stdout >= 0) {
+          restore_fd(saved_stdout, STDOUT_FILENO);
+        }
         continue;
       }
     }
 
     int should_exit = execute_command(command_args, command_arg_count);
 
+    if (saved_stderr >= 0) {
+      restore_fd(saved_stderr, STDERR_FILENO);
+    }
+
     if (saved_stdout >= 0) {
-      restore_stdout(saved_stdout);
+      restore_fd(saved_stdout, STDOUT_FILENO);
     }
 
     if (should_exit) {
