@@ -57,6 +57,8 @@ vcpkg_installed/
 
 # Release artifacts
 shell-*.tar.gz
+SHA256SUMS
+SHA256SUMS.*
 
 # Local temp files
 .DS_Store

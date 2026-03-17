@@ -2,7 +2,11 @@
 
 English | [中文版](README.md)
 
-A command-line shell implemented in C. The core runtime lives in [src/main.c](src/main.c).
+A command-line shell implemented in C.
+
+Notes:
+- The source repository contains the full codebase and build files.
+- Prebuilt release packages include the executable and usage docs only (no source tree).
 
 This document is intended for first-time users and focuses on features and usage.
 
@@ -22,6 +26,16 @@ This document is intended for first-time users and focuses on features and usage
 Recommended environment: Linux x86_64 with CMake and GCC/Clang installed.
 
 ## Run
+
+### Using a prebuilt release package
+
+Run directly inside the extracted directory:
+
+```sh
+./shell
+```
+
+### Build from source and run
 
 From the repository root:
 
