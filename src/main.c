@@ -66,6 +66,7 @@
 static const char *k_builtin_completion_candidates[] = {"echo", "exit"};
 static char g_history[MAX_HISTORY][MAX_COMMAND_LENGTH];
 static int g_history_count = 0;
+static char g_prompt_prefix[PATH_MAX + 8] = "$ ";
 
 /**
  * @brief Number of newest entries that exist only in memory.
@@ -76,11 +77,42 @@ static int g_history_count = 0;
  */
 static int g_history_unsaved_count = 0;
 
+static void format_prompt_path(const char *cwd, char *out, size_t out_size) {
+  const char *home = getenv("HOME");
+  if (home == NULL || *home == '\0') {
+    snprintf(out, out_size, "%s", cwd);
+    return;
+  }
+
+  size_t home_len = strlen(home);
+  if (strncmp(cwd, home, home_len) == 0 &&
+      (cwd[home_len] == '\0' || cwd[home_len] == '/')) {
+    if (cwd[home_len] == '\0') {
+      snprintf(out, out_size, "~");
+    } else {
+      snprintf(out, out_size, "~%s", cwd + home_len);
+    }
+    return;
+  }
+
+  snprintf(out, out_size, "%s", cwd);
+}
+
+static void update_prompt_prefix(void) {
+  char cwd[PATH_MAX];
+  char display_path[PATH_MAX];
+  if (getcwd(cwd, sizeof(cwd)) != NULL) {
+    format_prompt_path(cwd, display_path, sizeof(display_path));
+    snprintf(g_prompt_prefix, sizeof(g_prompt_prefix), "%s$ ", display_path);
+  } else {
+    snprintf(g_prompt_prefix, sizeof(g_prompt_prefix), "$ ");
+  }
+}
+
 /** @brief Treat only space and tab as inline separators. */
 static int is_space_or_tab(char c) { return c == ' ' || c == '\t'; }
 
-static int has_prefix(const char *text, const char *prefix,
-                       size_t prefix_len) {
+static int has_prefix(const char *text, const char *prefix, size_t prefix_len) {
   return strncmp(text, prefix, prefix_len) == 0;
 }
 
@@ -99,7 +131,7 @@ static void print_newline_for_shell_io(FILE *stream, int fd) {
 
 static void redraw_prompt_line(const char *line, size_t len,
                                size_t previous_len) {
-  printf("\r$ %s", line);
+  printf("\r%s%s", g_prompt_prefix, line);
 
   if (previous_len > len) {
     size_t extra = previous_len - len;
@@ -405,7 +437,7 @@ static void print_command_match_list(char **matches, size_t match_count,
     }
     printf("%s", matches[i]);
   }
-  printf("\n$ %s", line);
+  printf("\n%s%s", g_prompt_prefix, line);
 }
 
 static void print_file_match_list(FileCompletionEntry *entries,
@@ -420,7 +452,7 @@ static void print_file_match_list(FileCompletionEntry *entries,
       putchar('/');
     }
   }
-  printf("\n$ %s", line);
+  printf("\n%s%s", g_prompt_prefix, line);
 }
 
 static void set_pending_completion(TabCompletionState *state,
@@ -984,12 +1016,25 @@ static void handle_cd(const char *path) {
   }
 
   const char *target = path;
+  char expanded[PATH_MAX];
+
   if (strcmp(path, "~") == 0) {
     const char *home = getenv("HOME");
     if (home == NULL || *home == '\0') {
       return;
     }
     target = home;
+  } else if (path[0] == '~' && path[1] == '/') {
+    const char *home = getenv("HOME");
+    if (home == NULL || *home == '\0') {
+      return;
+    }
+
+    if (snprintf(expanded, sizeof(expanded), "%s%s", home, path + 1) >=
+        (int)sizeof(expanded)) {
+      return;
+    }
+    target = expanded;
   }
 
   if (chdir(target) != 0) {
@@ -1486,7 +1531,7 @@ static int count_argv_entries(char **args) {
 }
 
 static int split_pipeline_argv(char **args, int arg_count, char ***commands,
-                                   int *command_count) {
+                               int *command_count) {
   if (arg_count == 0) {
     return 0;
   }
@@ -1634,7 +1679,8 @@ int main(int argc, char *argv[]) {
   /** REPL flow: prompt -> read -> parse -> redirect -> execute -> restore. */
   char command[MAX_COMMAND_LENGTH];
   while (1) {
-    printf("$ ");
+    update_prompt_prefix();
+    printf("%s", g_prompt_prefix);
     if (read_command_line(command, sizeof(command)) < 0) {
       break;
     }

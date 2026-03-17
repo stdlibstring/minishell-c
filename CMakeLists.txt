@@ -8,4 +8,7 @@ set(CMAKE_C_STANDARD 23) # Enable the C23 standard
 
 add_executable(shell ${SOURCE_FILES})
 
-target_link_libraries(shell PRIVATE readline)
+find_library(READLINE_LIB readline)
+if(READLINE_LIB)
+	target_link_libraries(shell PRIVATE ${READLINE_LIB})
+endif()
