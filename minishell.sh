@@ -1,19 +1,13 @@
 #!/bin/sh
 #
 # Use this script to run your program LOCALLY.
-#
-# Note: Changing this script WILL NOT affect how CodeCrafters runs your program.
-#
-# Learn more: https://codecrafters.io/program-interface
 
 set -e # Exit early if any commands fail
 
-# Copied from .codecrafters/compile.sh
-#
-# - Edit this to change how your program compiles locally
-# - Edit .codecrafters/compile.sh to change how your program compiles remotely
+# Build the project locally.
 (
   cd "$(dirname "$0")" # Ensure compile steps are run within the repository directory
+  PROJECT_DIR="$(pwd)"
 
   TOOLCHAIN_ARG=""
   if [ -n "$VCPKG_ROOT" ] && [ -f "$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" ]; then
@@ -23,12 +17,17 @@ set -e # Exit early if any commands fail
     rm -rf build
   fi
 
+  if [ -f build/CMakeCache.txt ] &&
+     grep -q "CMAKE_HOME_DIRECTORY:INTERNAL=$PROJECT_DIR" build/CMakeCache.txt; then
+    :
+  elif [ -f build/CMakeCache.txt ]; then
+    # Directory rename/move can make CMakeCache.txt unusable.
+    rm -rf build
+  fi
+
   cmake -B build -S . $TOOLCHAIN_ARG
   cmake --build ./build
 )
 
-# Copied from .codecrafters/run.sh
-#
-# - Edit this to change how your program runs locally
-# - Edit .codecrafters/run.sh to change how your program runs remotely
+# Run the locally built shell.
 exec $(dirname "$0")/build/shell "$@"

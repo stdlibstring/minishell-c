@@ -51,5 +51,16 @@ Module.symvers
 Mkfile.old
 dkms.conf
 
-build
-vcpkg_installed
+build/
+dist/
+vcpkg_installed/
+
+# Release artifacts
+shell-*.tar.gz
+
+# Local temp files
+.DS_Store
+*.swp
+*.tmp
+out.txt
+h.txt

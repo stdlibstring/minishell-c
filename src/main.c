@@ -11,7 +11,7 @@
 
 /**
  * @file main.c
- * @brief Single-file shell implementation for the CodeCrafters Shell challenge.
+ * @brief Single-file shell implementation for minishell-c.
  *
  * @details
  * Major subsystems in this file:
